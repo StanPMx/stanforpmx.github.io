@@ -1,0 +1,13 @@
+# Preface {.unnumbered}
+
+---
+toc: false
+---
+
+Welcome to the book on Stan and R for Pharmacometrics. Here we provide an introduction to Bayesian principles, building blocks for starting to code in Stan, technical details on how to apply Stan and R for standard pharmacometrics workflows in drug research and development along with some hands on exercises.
+
+This will serve as a repository that can be freely accessed by anyone who would like to learn as well as contribute to the content. We plan to continuously add and enrich the content here when new code, approaches, or methods become available.
+
+We hope you will all benefit from this resource.
+
+Sincerely, <br> Casey, Yasong, Arya, and Pavan

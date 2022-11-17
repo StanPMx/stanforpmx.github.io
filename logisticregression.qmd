@@ -1,0 +1,441 @@
+# Logistic Regression Using `brms`
+
+```{r setup, include = FALSE}
+library(summarytools)
+knitr::opts_chunk$set(echo = TRUE)
+st_options(bootstrap.css     = FALSE,       
+           plain.ascii       = FALSE,       
+           style             = "rmarkdown", 
+           dfSummary.silent  = TRUE,       
+           footnote          = NA,       
+           subtitle.emphasis = FALSE)       
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Load Relevant Libraries
+
+```{r, warning = FALSE, results='hide', message = FALSE}
+library(summarytools)
+library(tidyverse) 
+library(brms)
+library(bayesplot)
+library(tidybayes) 
+library(gridExtra) 
+library(patchwork) 
+```
+
+## Logistic Regression
+
+The goal of logistic regression is to find the best fitting model to describe the relationship between the dichotomous characteristic of interest (response or outcome) and a set of independent (predictor or explanatory) variables.
+
+Data for this exercise **heart_cleveland_upload.csv** was obtained here (<https://www.kaggle.com/datasets/cherngs/heart-disease-cleveland-uci>). It is a multivariate dataset composed of 14 columns shown below:
+
+1.  age: age in years
+2.  sex: sex \[1 = male; 0 = female\]
+3.  cp: chest pain type \[0 = typical angina; 1 = atypical angina; 2 = non-anginal pain; 3 = asymptomatic\]
+4.  trestbps: resting blood pressure in mm Hg on admission to the hospital
+5.  chol: serum cholestoral in mg/dl
+6.  fbs: fasting blood sugar \> 120 mg/dl \[1 = true; 0 = false\]
+7.  restecg: resting electrocardiographic results \[0 = normal; 1 = having ST-T wave abnormality (T wave inversions and/or ST elevation or depression of \> 0.05 mV); 2 = showing probable or definite left ventricular hypertrophy by Estes' criteria\]
+8.  thalach: maximum heart rate achieved
+9.  exang: exercise induced angina \[1 = yes; 0 = no\]
+10. oldpeak = ST depression induced by exercise relative to rest
+11. slope: the slope of the peak exercise ST segment \[0 = upsloping; 1 = flat; 2 = downsloping\]
+12. ca: number of major vessels (0-3) colored by flourosopy
+13. thal: thallium stress test result \[0 = normal; 1 = fixed defect; 2 = reversible defect\]
+14. condition: 0 = no disease, 1 = disease
+
+## Import Data
+
+```{r}
+lrDataRaw <- read.csv("data/heart_cleveland_upload.csv") %>% 
+  as_tibble()
+```
+
+## Data Processing
+
+Convert categorical explanatory variables to factors
+
+```{r}
+lrData <- lrDataRaw %>% 
+  mutate(sex = factor(sex, levels = c(0, 1), labels = c("female", "male")),
+         cp = factor(cp, levels = 0:3, 
+                     labels = c("typical angina", "atypical angina", "non-anginal pain", "asymptomatic")),
+         fbs = factor(fbs, levels = c(0, 1), labels = c("false", "true")),
+         restecg = factor(restecg, levels = 0:2, labels = c("normal", "abnormal ST", "LV hypertrophy")),
+         exang = factor(exang, levels = c(0, 1), labels = c("no", "yes")),
+         slope = factor(slope, levels = 0:2, labels = c("upsloping", "flat", "downsloping")),
+         thal = factor(thal, levels = 0:2, labels = c("normal", "fixed defect", "reversable defect")))
+lrData
+```
+
+## Data Summary
+
+```{r}
+print(summarytools::dfSummary(lrData,
+          varnumbers = FALSE,
+          valid.col = FALSE,
+          graph.magnif = 0.76),
+      method = "render")
+```
+
+## Data Exploration
+
+First lets explore some relationships between categorical explanatory variables and outcome variable
+
+```{r}
+lrData %>% 
+  select(sex, cp, fbs, restecg, exang, slope, thal, condition) %>% 
+  pivot_longer(cols = c(sex, cp, fbs, restecg, exang, slope, thal),   
+               values_to = "value") %>% 
+  group_by(name, value) %>% 
+  summarize(condition = sum(condition))
+```
+
+## Model Fit
+
+We will start with a Bayesian binary logistic regression with non-informative priors.
+
+`brm` function is used to fit Bayesian generalized (non-)linear multivariate multilevel models using Stan for full Bayesian inference.
+
+The `brm` has three basic arguments: `formula`, `data`, and `family`. `warmup` specifies the burn-in period (i.e. number of iterations that should be discarded); `iter` specifies the total number of iterations (including the burn-in iterations); `chains` specifies the number of chains; inits specifies the starting values of the iterations (normally you can either use the maximum likelihood esimates of the parameters as starting values, or simply ask the algorithm to start with zeros); cores specifies the number of cores used for the algorithm; seed specifies the random seed, allowing for replication of results.
+
+```{r, warning = FALSE, results='hide', message = FALSE, cache=TRUE}
+lrfit1 <-  brm(condition ~ age + sex + cp + trestbps + chol + fbs + restecg + thalach + exang + oldpeak + slope + ca + thal,
+           data = lrData,
+           family = bernoulli(),
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+```
+
+## Model Evaluation
+
+### Summary
+
+Below is the summary of the logistic regression model fit:
+
+```{r}
+summary(lrfit1)
+```
+
+Looking at the 95% credible intervals for some of the estimates, they are very wide and include zero suggesting very uncertain estimates. Based on this finding, let's update the model and keep only sex, cp, trestbps, slope, ca, and thal as covariates.
+
+```{r, warning = FALSE, results='hide', message = FALSE, cache=TRUE}
+lrfit2 <-  brm(condition ~ sex + cp + trestbps + slope + ca + thal,
+           data = lrData,
+           family = bernoulli(),
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+```
+
+Below is the summary of the updated logistic regression fit:
+
+```{r}
+summary(lrfit2)
+```
+
+### Model Convergence
+
+The posterior distributions of the parameters: density and trace plots of the MCMC chains:
+
+```{r}
+plot(lrfit2)
+```
+
+The chains seem to be well mixed for all the parameters.
+
+`bayesplot` package gives us a bit more control on the plotting features.
+
+**Trace Plots:**
+
+```{r}
+post <- as_draws_df(lrfit2, add_chain = T)
+names(post)
+## Example with a few select parameters
+mcmc_trace(post[,c("b_sexmale", "b_trestbps", "b_ca", 
+                   ".chain", ".iteration", ".draw")],
+           facet_args = list(ncol = 2)) +
+theme_bw()
+```
+
+**Autocorrelation Plots:**
+
+```{r}
+mcmc_acf(post, pars = c("b_sexmale", "b_trestbps", "b_ca")) +
+  theme_bw()
+```
+
+## Frequentist Approach
+
+Just for fun, let's compare the estimation process using a frequentist approach using `glm`.
+
+```{r, warning = FALSE, results='hide', message = FALSE, cache=TRUE}
+lrfit3 <- glm(formula = condition ~ sex + cp+ trestbps + slope + ca + thal, 
+     family = "binomial", 
+     data = lrData)
+```
+
+```{r}
+summary(lrfit3)
+```
+
+Comparing the model estimates:
+
+```{r}
+t1 <- summary(lrfit3)$coefficients[, 1:2]
+t2 <- fixef(lrfit2)[, c(1, 2, 3, 4)]
+gridExtra::grid.arrange(arrangeGrob(tableGrob(round(t1, 4), rows = NULL), top = "Frequentist"), 
+                        arrangeGrob(tableGrob(round(t2, 4), rows = NULL), top = "Bayesian"), ncol = 2)
+```
+
+From the estimates above, the Bayesian model estimates are very close to those of the frequentist model. The interpretation of these estimates is the same between these approaches. However, the interpretation of the uncertainty intervals is not the same between the two models.
+
+With the frequentist model, the 95% uncertainty interval also called the confidence interval suggests that under repeated sampling, 95% of the resulting uncertainty intervals would cover the true population value. This is different from saying that there is a 95% chance that the confidence interval contains the true population value (not probability statements).
+
+With the Bayesian model, the 95% uncertainty interval also called the credibility interval is more interpretable and states that there is 95% chance that the true population value falls within this interval. When the 95% credibility intervals do not contain zero, we conclude that the respective model parameters are less uncertain and likely more meaningful.
+
+## Priors
+
+Prior specifications are useful in Bayesian modeling as they provide a means to include existing information on parameters of interest. As an example, if we are interested in learning about new population (e.g. pediatrics) and have the adult information on estimated parameters, including prior distributions based on adult parameters give us flexibility to explicitly apply our understanding on the estimation of such parameters for the pediatric population.
+
+To see a list of all the priors that can be specified, we can use `get_prior`.
+
+```{r}
+get_prior(condition ~ sex + cp + trestbps + slope + ca + thal,
+           data = lrData)
+```
+
+### Set Up Priors
+
+Let's set some priors and let's assume we know precisely one of the priors `thalfixeddefect`.
+
+```{r}
+prior1 <- c(set_prior("normal(5, 100)", class = "b", coef = "sexmale"),
+            set_prior("normal(0.1, 0.03)", class = "b", coef = "thalfixeddefect"),
+            set_prior("normal(5, 100)", class = "b", coef = "thalreversabledefect"))
+```
+
+### Model Fit with Priors
+
+We can incorporate the priors into the model as follows:
+
+```{r, warning = FALSE, results='hide',  message = FALSE, cache=TRUE}
+lrfit4 <-  brm(condition ~ sex + cp + trestbps + slope + ca + thal,
+           data = lrData,
+           family = bernoulli(),
+           prior = prior1,
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0, 
+           backend = "cmdstanr",
+           sample_prior = TRUE)
+```
+
+To see how the priors have been updated in the model, we use `prior_summary`:
+
+```{r}
+prior_summary(lrfit4)
+```
+
+```{r}
+summary(lrfit4)
+```
+
+### Compare Prior and Posterior Samples
+
+Let's compare the prior and posterior distributions for a non-informative prior `sexmale` and a highly informative prior `thalfixeddefect`
+
+```{r}
+priorSamples <- prior_draws(lrfit4, c("b_sexmale", "b_thalfixeddefect")) 
+posteriorSamples <- as_draws_df(lrfit4, c("b_sexmale", "b_thalfixeddefect"))
+p1 <- ggplot() +
+  geom_density(data = priorSamples, aes(x = b_sexmale, fill = "prior"), alpha = 0.5) +
+  geom_density(data = posteriorSamples, aes(x = b_sexmale, fill = "posterior"), alpha = 0.5) +
+  scale_fill_manual(name = "", values = c("prior" = "lightblue", "posterior" = "darkblue")) +
+  scale_x_continuous (limits = c(-10, 10)) + theme_bw()
+p2 <- ggplot() +
+  geom_density(data = priorSamples, aes(x = b_thalfixeddefect, fill = "prior"), alpha = 0.5) +
+  geom_density(data = posteriorSamples, aes(x = b_thalfixeddefect, fill = "posterior"), alpha = 0.5) +
+  scale_fill_manual(name = "", values = c("prior" = "lightblue", "posterior" = "darkblue")) +
+  scale_x_continuous(limits = c(-0.1, 0.3)) + theme_bw() + theme(legend.position = "top")
+p3 <- p1 + p2 & theme(legend.position = "top")
+p3 + plot_layout(guides = "collect")
+```
+
+## Hands-On Example
+
+A simulated dataset for this exercise **simlrcovs.csv** was developed. It has the following columns:
+
+1.  DOSE: Dose of drug in mg \[20, 50, 100, 200 mg\]
+2.  CAVG: Average concentration until the time of the event (mg/L)
+3.  ECOG: ECOG performance status \[0 = Fully active; 1 = Restricted in physical activity\]
+4.  RACE: Race \[1 = Others; 2 = White\]
+5.  SEX: Sex \[1 = Female; 2 = Male\]
+6.  BRNMETS: Brain metastasis \[1 = Yes; 0 = No\]
+7.  DV: Event \[1 = Yes; 0 = No\]
+
+### Import Dataset
+
+```{r}
+# Read the dataset
+hoRaw <- read.csv("data/simlrcovs.csv") %>% 
+  as_tibble()
+```
+
+### Data Processing
+
+Convert categorical explanatory variables to factors
+
+```{r}
+hoData <- hoRaw %>% 
+  mutate(ECOG = factor(ECOG, levels = c(0, 1), labels = c("Active", "Restricted")),
+         RACE = factor(RACE, levels = c(0, 1), labels = c("White", "Others")),
+         SEX = factor(SEX, levels = c(0, 1), labels = c("Male", "Female")),
+         BRNMETS = factor(BRNMETS, levels = c(0, 1), labels = c("No", "Yes")))
+hoData
+```
+
+### Data Summary
+
+```{r, eval=FALSE}
+  xxxxxx
+  
+```
+
+### Model Fit
+
+With all covariates except DOSE (since we have exposure as a driver)
+
+```{r, eval=FALSE}
+hofit1 <-  brm(xxxxxx ~ xxxxxx,
+           data = xxxxxx,
+           family = xxxxxx,
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+```
+
+### Model Evaluation
+
+Get the summary of the model and look at the fixed efects
+
+```{r, eval=FALSE}
+xxxxxx
+```
+
+### Final Model
+
+Refit the model with meaningful covariates
+
+```{r, eval=FALSE}
+hofit2 <-  brm(xxxxxx ~ xxxxxx,
+           data = xxxxxx,
+           family = xxxxxx,
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+```
+
+### Summary
+
+```{r, eval=FALSE}
+xxxxxx
+```
+
+### Model Convergence
+
+```{r, eval=FALSE}
+hopost <- as_draws_df(xxxxxx, add_chain = T)
+mcmc_trace(xxxxxx) +
+  theme_bw()
+```
+
+```{r, eval=FALSE}
+mcmc_acf(xxxxxx) + 
+  theme_bw()
+```
+
+### Visual Interpretation of the Model (Bonus Points!)
+
+We can do this two ways.
+
+#### Generate Posterior Probabilities Manually
+
+Generate posterior probability of the event using the estimates and their associated posterior distributions
+
+```{r, eval=FALSE}
+out <- hofit2 %>%
+  spread_draws(b_Intercept, b_CAVG, b_RACEOthers) %>% 
+  mutate(CAVG = list(seq(100, 4000, 10))) %>% 
+  unnest(cols = c(CAVG)) %>%
+  mutate(RACE = list(0:1)) %>% 
+  unnest(cols = c(RACE)) %>% 
+  mutate(PRED = exp(b_Intercept + b_CAVG * CAVG + b_RACEOthers * RACE)/(1 + exp(b_Intercept + b_CAVG * CAVG + b_RACEOthers * RACE))) %>%
+  group_by(CAVG, RACE) %>%
+  summarise(pred_m = mean(PRED, na.rm = TRUE),
+            pred_low = quantile(PRED, prob = 0.025),
+            pred_high = quantile(PRED, prob = 0.975)) %>% 
+  mutate(RACE = factor(RACE, levels = c(0, 1), labels = c("White", "Others")))
+```
+
+Plot The Probability of the Event vs Average Concentration
+
+```{r, eval=FALSE}
+out %>%
+  ggplot(aes(x = CAVG, y = pred_m, color = factor(RACE))) +
+  geom_line() +
+  geom_ribbon(aes(ymin = pred_low, ymax = pred_high, fill = factor(RACE)), alpha = 0.2) +
+  ylab("Predicted Probability of the Event\n") +
+  xlab("\nAverage Concentration until the Event (mg/L)") +
+  theme_bw() + 
+  scale_fill_discrete("") +
+  scale_color_discrete("") +
+  theme(legend.position = "top")
+```
+
+#### Generate Posterior Probabilities Using Helper Functions from `brms` and `tidybayes`
+
+Generate posterior probability of the event using the estimates and their associated posterior distributions
+
+```{r, eval=FALSE}
+out2 <- hofit2 %>%
+  epred_draws(newdata = expand_grid(CAVG = seq(100, 4000, by = 10), 
+                                    RACE = c("White", "Others")),
+              value = "PRED") %>% 
+  ungroup() %>% 
+  mutate(RACE = factor(RACE, levels = c("White", "Others"), 
+                       labels = c("White", "Others")))
+```
+
+Plot The Probability of the Event vs Average Concentration
+
+```{r, eval=FALSE}
+out2 %>% 
+  ggplot() +
+  stat_lineribbon(aes(x = CAVG, y = PRED, color = RACE, fill = RACE), 
+                  .width = 0.95, alpha = 0.25) +
+  ylab("Predicted Probability of the Event\n") +
+  xlab("\nAverage Concentration until the Event (mg/L)") +
+  theme_bw() + 
+  scale_fill_discrete("") +
+  scale_color_discrete("") +
+  theme(legend.position = "top") +
+  ylim(c(0, 1))
+```

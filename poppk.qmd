@@ -1,0 +1,3557 @@
+---
+title: "A Bayesian Approach to PK/PD using Stan and Torsten"
+format:
+  html:
+    code-fold: true
+    code-summary: "Code"
+    code-tools: true
+    number-sections: true
+    toc-depth: 5
+---
+
+```{r set, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE, echo = TRUE, message = FALSE, 
+                      warning = FALSE, include = TRUE)
+```
+
+<!-- ```{css, echo=FALSE} -->
+
+<!-- pre { -->
+
+<!--   max-height: 300px; -->
+
+<!--   overflow-y: auto; -->
+
+<!-- } -->
+
+<!-- pre[class] { -->
+
+<!--   max-height: 300px; -->
+
+<!-- } -->
+
+<!-- ``` -->
+
+```{css, echo=FALSE}
+.scroll-300 {
+  max-height: 300px;
+  overflow-y: auto;
+  background-color: inherit;
+}
+```
+
+```{css, echo=FALSE}
+.remark-slide-scaler {
+    overflow-y: auto;
+}
+```
+
+```{r setup, include=FALSE}
+options(width = 60)
+local({
+  hook_output <- knitr::knit_hooks$get('output')
+  knitr::knit_hooks$set(output = function(x, options) {
+    if (!is.null(options$max.height)) options$attr.output <- c(
+      options$attr.output,
+      sprintf('style="max-height: %s;"', options$max.height)
+    )
+    hook_output(x, options)
+  })
+})
+
+```
+
+```{r package_load, include=TRUE, message=FALSE, warning=FALSE}
+
+library(collapsibleTree)
+library(mrgsolve)
+library(patchwork)
+library(tidyverse)
+library(gganimate)
+library(bayesplot)
+library(tidybayes)
+library(loo)
+library(posterior)
+library(cmdstanr)
+
+```
+
+```{=html}
+<style>
+.vscroll-plot {
+    height: 600px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+```
+```{=html}
+<style>
+.vscroll-plot1 {
+    height: 600px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+```
+```{=html}
+<style>
+.vscroll-plot2 {
+    height: 400px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+```
+## Introduction
+
+We can use Stan and Torsten for the whole PK/PD workflow. In this section we will talk briefly about simulation and extensively about fitting a PopPK model to observed data and simulating/predicting future data given the results of the model fit.
+
+## Simple Example - Single Dose, Single Individual
+
+First we will show a very simple example - a single oral dose for a single individual:
+
+### PK Model {#toy-pk-model}
+
+The data-generating model is:
+
+```{=tex}
+\begin{align}
+C_i &= f(\mathbf{\theta}, t_i)*e^{\epsilon_i}, \; \epsilon_i \sim 
+N(0, \sigma^2) \notag \\
+&= \frac{D}{V}\frac{k_a}{k_a - k_e}\left(e^{-k_e(t-t_D)} - e^{-k_a(t-t_D)} 
+\right)*e^{\epsilon_i}
+\end{align}
+```
+where $\mathbf{\theta} = \left[k_a, CL, V\right]^\top$ is a vector containing the individual parameters for this individual, $k_e = \frac{CL}{V}$, $D$ is the dose amount, and $t_D$ is the time of the dose. We will have observations at times *0.5, 1, 2, 4, 12*, and *24* and simulate the data with a dose of 200 mg and true parameter values as follows:
+
+```{r true-values-single, include=TRUE, eval=TRUE, echo=FALSE}
+tribble(
+  ~Parameter, ~Value, ~Units    , ~Description,
+  "$CL$"     , 5     , "$\\frac{L}{h}$", "Clearance",
+  "$V$"      , 50    ,  "$L$"    , "Central compartment volume",
+  "$k_a$"    , 0.5   , "$h^{-1}$", "Absorption rate constant",
+  "$\\sigma$", 0.2   , "-", "Standard deviation for lognormal residual error",
+) %>%
+  knitr::kable(align = "lrcl", booktabs = TRUE, 
+               caption = "True Parameter Values for Single Individual")
+
+```
+
+### Simulating Data
+
+Many of you who simulate data in *R* probably use a package like *mrgsolve* or *RxODE*, and those are perfectly good tools, but we can also do our simulations directly in Stan.
+
+::: panel-tabset
+#### Stan
+
+```{r model-single, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+model_simulate_stan <- cmdstan_model(
+  "Stan/Simulate/depot_1cmt_lognormal_single.stan")  
+
+model_simulate_stan$print()
+```
+
+```{r simulate-single, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE, results='hide'}
+
+times_to_observe <- c(0.5, 1, 2, 4, 12, 24)
+
+times_to_simulate <- times_to_observe %>% 
+  c(seq(0, 24, by = 0.25)) %>% 
+  sort() %>% 
+  unique()
+
+stan_data_simulate <- list(n_obs = length(times_to_simulate),
+                           dose = 200,
+                           time = times_to_simulate,
+                           time_of_first_dose = 0,
+                           CL = 5,
+                           V = 50,
+                           KA = 0.5, 
+                           sigma = 0.2)
+
+simulated_data_stan <- model_simulate_stan$sample(data = stan_data_simulate,
+                                                  fixed_param = TRUE,
+                                                  seed = 1,
+                                                  iter_warmup = 0,
+                                                  iter_sampling = 1,
+                                                  chains = 1,
+                                                  parallel_chains = 1,
+                                                  show_messages = TRUE) 
+
+data_stan <- simulated_data_stan$draws(format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>% 
+  mutate(time = times_to_simulate[i]) %>%
+  ungroup() %>% 
+  select(time, cp, dv)
+
+observed_data_stan <- data_stan %>%  
+  filter(time %in% times_to_observe) %>% 
+  select(time, dv)
+
+```
+
+```{r single-data-table-stan, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+observed_data_stan %>% 
+  mutate(dv = round(dv, 3)) %>% 
+  knitr::kable(col.names = c("Time", "Concentration"),
+               caption = "Observed Data for a Single Individual") %>% 
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+And here we can see the observed data overlayed on top of the "truth".
+
+```{r single-data-plot, cache=TRUE, eval=TRUE, echo=TRUE, include=TRUE}
+ggplot(mapping = aes(x = time)) +
+  geom_line(data = data_stan,
+            mapping = aes(y = cp)) +
+  geom_point(data = observed_data_stan,
+             mapping = aes(y = dv), 
+             color = "red", size = 3) +
+  theme_bw(18) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+
+```
+
+#### Stan + Torsten
+
+```{r model-single-torsten, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+set_cmdstan_path("~/Torsten/cmdstan/")
+
+model_simulate_torsten <- cmdstan_model(
+  "Torsten/Simulate/depot_1cmt_lognormal_single.stan") 
+  
+model_simulate_torsten$print()
+```
+
+```{r simulate-single-torsten, cache=TRUE, max.height='300px', comment=NA, results='hide', eval=TRUE, echo=TRUE, include=TRUE}
+
+times_to_observe <- c(0.5, 1, 2, 4, 12, 24)
+
+times_to_simulate <- times_to_observe %>% 
+  c(seq(0.25, 24, by = 0.25)) %>% 
+  sort() %>% 
+  unique()
+
+nonmem_data_single <- mrgsolve::ev(ID = 1, amt = 200, cmt = 1, evid = 1,
+                                   rate = 0, ii = 0, addl = 0, ss = 0) %>%
+  as_tibble() %>%
+  bind_rows(tibble(ID = 1, time = times_to_simulate, amt = 0, cmt = 2, evid = 0,
+                   rate = 0, ii = 0, addl = 0, ss = 0))
+
+torsten_data_simulate <- with(nonmem_data_single,
+                              list(n_obs = nrow(nonmem_data_single),
+                                   amt = amt,
+                                   cmt = cmt,
+                                   evid = evid,
+                                   rate = rate,
+                                   ii = ii,
+                                   addl = addl,
+                                   ss = ss,
+                                   time = time,
+                                   CL = 5,
+                                   V = 50,
+                                   KA = 0.5,
+                                   sigma = 0.2))
+
+simulated_data_torsten <- model_simulate_torsten$sample(data = torsten_data_simulate,
+                                                        fixed_param = TRUE,
+                                                        seed = 1,
+                                                        iter_warmup = 0,
+                                                        iter_sampling = 1,
+                                                        chains = 1,
+                                                        parallel_chains = 1,
+                                                        show_messages = TRUE)
+
+data_torsten <- simulated_data_torsten$draws(format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>%
+  mutate(time = times_to_simulate[i]) %>%
+  ungroup() %>%
+  select(time, cp, dv)
+
+observed_data_torsten <- data_torsten %>%
+  filter(time %in% times_to_observe) %>%
+  select(time, dv)
+
+```
+
+```{r single-data-table-torsten, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+observed_data_torsten %>%
+  mutate(dv = round(dv, 3)) %>%
+  knitr::kable(col.names = c("Time", "Concentration"),
+               caption = "Observed Data for a Single Individual") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+And here we can see the observed data overlayed on top of the "truth".
+
+```{r single-data-plot-torsten, cache=TRUE, eval=TRUE, echo=FALSE, include=TRUE}
+ggplot(mapping = aes(x = time)) +
+  geom_line(data = data_torsten,
+            mapping = aes(y = cp)) +
+  geom_point(data = observed_data_torsten,
+             mapping = aes(y = dv),
+             color = "red", size = 3) +
+  theme_bw(18) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+
+```
+:::
+
+### Fitting the Data {#sec-single-individual-fit-stan-and-torsten}
+
+Now we want to fit the data[^poppk-1] to our model. We write the model in a `.stan` file[^poppk-2] (analogous to a `.ctl` or `.mod` file in NONMEM):
+
+[^poppk-1]: Note that I'll fit the data from the Torsten simulation. Either would be fine, but I want to fit the same data whether I'm fitting with pure Stan code or with Stan + Torsten.
+
+[^poppk-2]: You could also write the model inline in a string, but I think that isn't good practice in general, and especially when the model is hundreds of lines long.
+
+::: panel-tabset
+#### Stan
+
+I've first written a model using pure Stan code. Let's look at the model.
+
+```{r fit-single-stan-model, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+model_fit_stan <- cmdstan_model(
+  "Stan/Fit/depot_1cmt_lognormal_single.stan")  
+
+model_fit_stan$print()
+```
+
+Now we prepare the data for Stan and fit it:
+
+```{r fit-single-stan, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+stan_data_fit <- list(n_obs = nrow(observed_data_torsten),
+                      dose = 200,
+                      time = observed_data_torsten$time,
+                      time_of_first_dose = 0,
+                      dv = observed_data_torsten$dv,
+                      scale_cl = 10,
+                      scale_v = 10,
+                      scale_ka = 1,
+                      scale_sigma = 0.5,
+                      n_pred = length(times_to_simulate),
+                      time_pred = times_to_simulate)
+
+
+fit_single_stan <- model_fit_stan$sample(data = stan_data_fit,
+                                         chains = 4,
+                                         # parallel_chains = 4,
+                                         iter_warmup = 1000,
+                                         iter_sampling = 1000,
+                                         adapt_delta = 0.95,
+                                         refresh = 500,
+                                         max_treedepth = 15,
+                                         seed = 8675309,
+                                         init = function() 
+                                           list(CL = rlnorm(1, log(8), 0.3),
+                                                V = rlnorm(1, log(40), 0.3),
+                                                KA = rlnorm(1, log(0.8), 0.3),
+                                                sigma = rlnorm(1, log(0.3), 0.3)))
+
+```
+
+#### Stan + Torsten
+
+I've now written a model that uses Torsten's built-in function for a one-compartment PK model. Let's look at the model.
+
+```{r fit-single-torsten-model, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+model_fit_torsten <- cmdstan_model(
+  "Torsten/Fit/depot_1cmt_lognormal_single.stan")   
+
+model_fit_torsten$print()
+```
+
+Now we prepare the data for the Stan model with Torsten functions and fit it:
+
+```{r fit-single-torsten, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+nonmem_data_single_fit <- nonmem_data_single %>% 
+  inner_join(observed_data_torsten, by = "time") %>% 
+  bind_rows(nonmem_data_single %>% 
+              filter(evid == 1)) %>% 
+  arrange(time) %>% 
+  mutate(dv = if_else(is.na(dv), 5555555, dv))
+
+i_obs <- nonmem_data_single_fit %>%
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)
+
+torsten_data_fit <- list(n_total = nrow(nonmem_data_single_fit),
+                         n_obs = n_obs,
+                         i_obs = i_obs,
+                         amt = nonmem_data_single_fit$amt,
+                         cmt = nonmem_data_single_fit$cmt,
+                         evid = nonmem_data_single_fit$evid,
+                         rate = nonmem_data_single_fit$rate,
+                         ii = nonmem_data_single_fit$ii,
+                         addl = nonmem_data_single_fit$addl,
+                         ss = nonmem_data_single_fit$ss,
+                         time = nonmem_data_single_fit$time,
+                         dv = nonmem_data_single_fit$dv,
+                         scale_cl = 10,
+                         scale_v = 10,
+                         scale_ka = 1,
+                         scale_sigma = 0.5,
+                         n_pred = nrow(nonmem_data_single),
+                         amt_pred = nonmem_data_single$amt,
+                         cmt_pred = nonmem_data_single$cmt,
+                         evid_pred = nonmem_data_single$evid,
+                         rate_pred = nonmem_data_single$rate,
+                         ii_pred = nonmem_data_single$ii,
+                         addl_pred = nonmem_data_single$addl,
+                         ss_pred = nonmem_data_single$ss,
+                         time_pred = nonmem_data_single$time)
+
+fit_single_torsten <- model_fit_torsten$sample(data = torsten_data_fit,
+                                         chains = 4,
+                                         # parallel_chains = 4,
+                                         iter_warmup = 1000,
+                                         iter_sampling = 1000,
+                                         adapt_delta = 0.95,
+                                         refresh = 500,
+                                         max_treedepth = 15,
+                                         seed = 8675309,
+                                         init = function() 
+                                           list(CL = rlnorm(1, log(8), 0.3),
+                                                V = rlnorm(1, log(40), 0.3),
+                                                KA = rlnorm(1, log(0.8), 0.3),
+                                                sigma = rlnorm(1, log(0.3), 0.3)))
+
+```
+:::
+
+### Post-Processing and What is Happening
+
+In the [post-processing](#post-processing) section, we will go through some of the MCMC sampler checking that we should do here, but we will skip it for brevity and go through it more thoroughly later.
+
+We want to look at summaries of the posterior (posterior mean, median, quantiles, and standard deviation), posterior densities for our parameters, and 2D joint posterior densities:
+
+```{r single-summarize, cache=TRUE, class.output="scroll-300", max.height='450px', fig.align="center"}
+summarize_draws(fit_single_torsten$draws(),
+                mean, median, sd, mcse_mean,
+                ~quantile2(.x, probs = c(0.025, 0.975)), rhat,
+                ess_bulk, ess_tail) %>%
+  mutate(rse = sd/mean*100,
+         across(where(is.numeric), round, 3)) %>%
+  select(variable, mean, sd, rse, q2.5, median, q97.5, rhat,
+         starts_with("ess")) %>%
+  knitr::kable(col.names = c("Variable", "Mean", "Std. Dev.", "RSE", "2.5%",
+                             "Median", "97.5%", "$\\hat{R}$", "ESS Bulk",
+                             "ESS Tail")) %>%
+  kableExtra::column_spec(column = 1:10, width = "30em") %>%
+  kableExtra::scroll_box(width = "800px", height = "200px")
+
+mcmc_pairs(fit_single_torsten$draws(c("CL", "V", "KA", "sigma")),
+           diag_fun = "dens")
+```
+
+We have also created a predicted curve for each draw from the posterior ( `cp` in the code). Here, 5 draws are highlighted, and you can see the curve corresponding to each of these draws, along with a few others:
+
+```{r single-draws-highlight, cache=TRUE, class.output="scroll-300", max.height='450px'}
+draws_single <- fit_single_torsten$draws(format = "draws_df")
+
+draws_to_highlight <- seq(1, 9, by = 2)
+colors_to_highlight <- c("red", "blue", "green", "purple", "orange")
+
+draws_single %>%
+  filter(.draw <= 100) %>%
+  select(starts_with("."), CL, V, KA, KE, sigma, starts_with(c("cp", "dv"))) %>%
+  as_tibble() %>%
+  mutate(across(where(is.double), round, 3)) %>%
+  DT::datatable(rownames = FALSE, filter = "top",
+                options = list(scrollX = TRUE,
+                               columnDefs = list(list(className = 'dt-center',
+                                                      targets = "_all")))) %>%
+  DT::formatStyle(".draw", target = "row",
+                  backgroundColor = DT::styleEqual(draws_to_highlight,
+                                                   colors_to_highlight))
+
+
+preds_single <- draws_single %>%
+  spread_draws(cp[i], dv_pred[i]) %>%
+  mutate(time = torsten_data_fit$time_pred[i]) %>%
+  ungroup() %>%
+  arrange(.draw, time)
+
+
+
+preds_single %>%
+  mutate(sample_draws = .draw %in% draws_to_highlight,
+         color = case_when(.draw == draws_to_highlight[1] ~
+                             colors_to_highlight[1],
+                           .draw == draws_to_highlight[2] ~
+                             colors_to_highlight[2],
+                           .draw == draws_to_highlight[3] ~
+                             colors_to_highlight[3],
+                           .draw == draws_to_highlight[4] ~
+                             colors_to_highlight[4],
+                           .draw == draws_to_highlight[5] ~
+                             colors_to_highlight[5],
+                           TRUE ~ "black")) %>%
+  # filter(.draw %in% c(draws_to_highlight, sample(11:max(.draw), 100))) %>%
+  filter(.draw <= 100) %>%
+  arrange(desc(.draw)) %>%
+  ggplot(aes(x = time, y = cp, group = .draw)) +
+  geom_line(aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  scale_color_manual(name = NULL,
+                     breaks = c("red", "blue", "green", "purple", "orange",
+                                "black"),
+                     values = c("red", "blue", "green", "purple", "orange",
+                                "black")) +
+  scale_size_manual(name = NULL,
+                    breaks = c(FALSE, TRUE),
+                    values = c(1, 1.5)) +
+  scale_alpha_manual(name = NULL,
+                     breaks = c(FALSE, TRUE),
+                     values = c(0.10, 1))  +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+```
+
+This collection of predicted concentration curves, one for each sample from the posterior distribution, gives us a distribution for the "true" concentration at each time point. From this distribution we can plot our mean prediction (essentially an *IPRED* curve) and 95% credible interval (the Bayesian version of a confidence interval) for that mean:
+
+```{r single-ci, fig.align="center", cache=TRUE}
+(mean_and_ci <- preds_single %>%
+  group_by(time) %>%
+  mean_qi(cp, .width = 0.95) %>%
+  ggplot(aes(x = time, y = cp)) +
+  geom_line(size = 1.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              fill = "yellow", alpha = 0.25) +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+   coord_cartesian(ylim = c(0, 4.5)))
+```
+
+To do some model checking and to make future predictions, we can also get a mean prediction and 95% *prediction interval* from our replicates of the concentration (one replicate, `dv`, for each draw from the posterior):
+
+```{r single-pi, fig.align="center", cache=TRUE}
+
+(mean_and_pi <- preds_single %>%
+  group_by(time) %>%
+  mean_qi(dv_pred, .width = 0.95) %>%
+  ggplot(aes(x = time, y = dv_pred)) +
+  geom_line(size = 1.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              fill = "yellow", alpha = 0.25) +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+   coord_cartesian(ylim = c(0, 6)))
+
+
+```
+
+What's actually happening is that we get the *posterior density* of the prediction for a given time[^poppk-3]
+
+[^poppk-3]: We actually do this with the `dv` curve, since we want a *prediction interval*, which involves residual error, but simulated DV curves (with residual error) are ugly, see above.
+
+<p><a class="btn btn-primary" data-bs-toggle="collapse" href="#dv-curves" role="button" aria-expanded="false" aria-controls="dv-curves"> Show/Hide DV Curves </a></p>
+
+::: {#dv-curves .collapse}
+::: {.card .card-body}
+```{r single-cp-and-dv-button, fig.align="center", cache=TRUE, echo=FALSE}
+
+preds_single_g <- draws_single %>%
+  gather_draws(cp[i], dv_pred[i]) %>%
+  mutate(time = torsten_data_fit$time_pred[i]) %>%
+  ungroup() %>%
+  arrange(.draw, time)
+
+preds_single_g %>%
+  mutate(sample_draws = .draw %in% draws_to_highlight,
+         color = case_when(.draw == draws_to_highlight[1] ~
+                             colors_to_highlight[1],
+                           .draw == draws_to_highlight[2] ~
+                             colors_to_highlight[2],
+                           .draw == draws_to_highlight[3] ~
+                             colors_to_highlight[3],
+                           .draw == draws_to_highlight[4] ~
+                             colors_to_highlight[4],
+                           .draw == draws_to_highlight[5] ~
+                             colors_to_highlight[5],
+                           TRUE ~ "black"),
+         type = if_else(.variable == "cp", "No Residual Error",
+                        "With Residual Error")) %>%
+  # filter(.draw %in% c(draws_to_highlight, sample(11:max(.draw), 100))) %>%
+  filter(.draw <= 100) %>%
+  arrange(desc(.draw)) %>% {
+  ggplot(., aes(x = time, y = .value, group = .draw)) +
+  geom_line(data = filter(., !sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  geom_line(data = filter(., sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  scale_color_manual(name = NULL,
+                     breaks = c("red", "blue", "green", "purple", "orange",
+                                "black"),
+                     values = c("red", "blue", "green", "purple", "orange",
+                                "black")) +
+  scale_size_manual(name = NULL,
+                    breaks = c(FALSE, TRUE),
+                    values = c(1, 1.5)) +
+  scale_alpha_manual(name = NULL,
+                     breaks = c(FALSE, TRUE),
+                     values = c(0.10, 1))  +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  facet_wrap(~ type)}
+
+```
+:::
+:::
+
+Let's look at the posterior density for the time points that were actually observed:
+
+```{r single-pi-density, fig.align="center", cache=TRUE}
+mean_and_pi +
+  stat_halfeye(data = preds_single %>%
+                 filter(time %in% times_to_observe),
+               aes(x = time, y = dv_pred, group = time),
+               scale = 2, interval_size = 2, .width = 0.95,
+               point_interval = mean_qi, normalize = "xy") +
+  geom_point(data = observed_data_torsten,
+             mapping = aes(x = time, y = dv), color = "red", size = 3) +
+  coord_cartesian(ylim = c(0, 6))
+```
+
+<p><a class="btn btn-primary" data-bs-toggle="collapse" href="#ci-pi" role="button" aria-expanded="false" aria-controls="ci-pi"> Show/Hide Intervals </a></p>
+
+::: {#ci-pi .collapse}
+::: {.card .card-body}
+```{r single-ci-pi-overlay-button, fig.align="center", cache=TRUE, echo=FALSE}
+preds_single_g %>% 
+  group_by(.variable, time) %>% 
+  mean_qi(.value) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = time, group = .variable)) +
+  geom_line(aes(y = .value), size = 2.1) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, alpha = .variable), 
+              fill = "blue") +
+  scale_alpha_discrete(name = "Interval Type",
+                      breaks = c("cp", "dv_pred"),
+                      labels = c("Credible", "Prediction"),
+                      range = c(0.5, 0.25)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "plain"),
+        axis.title = element_text(size = 18, face = "plain"),
+        axis.line = element_line(size = 1),
+        legend.position = "bottom") +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  geom_point(data = observed_data_torsten, aes(x = time, y = dv), 
+             color = "red", size = 2, inherit.aes = FALSE)
+```
+:::
+:::
+
+## Two-Compartment Model with IV Infusion
+
+We will use a simple, easily understood, and commonly used model to show many of the elements of the workflow of PopPK modeling in Stan with Torsten. We will talk about
+
+-   Simulation
+-   Methods for selection of priors
+-   Handling BLOQ values
+-   Prediction for observed subjects and potential future patients
+-   Covariate effects
+-   Within-Chain parallelization to speed up the MCMC sampling
+
+### PK Model
+
+In this example I have simulated data from a two-compartment model with IV infusion with proportional-plus-additive error. The data-generating model is $$C_{ij} = f(\mathbf{\theta}_i, t_{ij})*\left( 1 + \epsilon_{p_{ij}} \right) + \epsilon_{a_{ij}}$$ where $\mathbf{\theta}_i = \left[CL_i, \, V_{c_i}, \, Q_i, \,V_{p_i}\right]^\top$ is a vector containing the individual parameters for individual $i$[^poppk-4], and $f(\cdot, \cdot)$ is the two-compartment model mean function seen [here](https://r-forge.r-project.org/scm/viewvc.php/*checkout*/PFIM3.2.2/PFIM_PKPD_library.pdf?root=pkpd). The corresponding system of ODEs is:
+
+[^poppk-4]: These parameters are the macro-parameterization of this model - clearance, central compartment volume, inter-compartmental clearance, and peripheral compartment volume, respectively. I have chosen to use $V_c$ and $V_p$ for **c**entral compartment volume and **p**eripheral compartment volume rather than $V_1$ and $V_2$ or $V_2$ and $V_3$ to reduce any confusion about the numbering (since $V_2$ is the central compartment in a two-compartment depot model but the peripheral compartment in an IV model in NONMEM)
+
+$$\begin{align}
+\frac{dA_d}{dt} &= -K_a*A_d \notag \\
+\frac{dA_c}{dt} &= rate_{in} + K_a*A_d - \left(\frac{CL}{V_c} + \frac{Q}{V_c}\right)A_C + \frac{Q}{V_p}A_p  \notag \\
+\frac{dA_p}{dt} &= \frac{Q}{V_c}A_c - \frac{Q}{V_p}A_p \\
+\end{align}$$ {#eq-2cmt-macro-genode}
+
+and then $C = \frac{A_c}{V_c}$[^poppk-5].
+
+[^poppk-5]: You'll notice that I wrote down the ODE as if there is first-order absorption. This is to emphasize that the central compartment is the second compartment in Torsten's setup, and we will have to make sure $CMT = 2$ for our dosing and observation records. Since there is no absorption, we just leave it out of our model and set it to 0 when using Torsten's analytical solver
+
+The true parameters used to simulate the data are as follows:
+
+```{r, include=TRUE, eval=TRUE, echo=FALSE}
+#| label: tbl-true-values-iv-2cmt
+#| tbl-cap: True Parameter Values
+
+tribble(
+  ~Parameter, ~Value, ~Units    , ~Description,
+  "TVCL", 0.2   , "$\\frac{L}{d}$", "Population value for clearance",
+  "TVVC",  3    ,  "$L$"          , "Population value for central compartment volume",
+  "TVQ" , 1.4   , "$\\frac{L}{d}$", "Population value for intercompartmental clearance",
+  "TVVP",   4   ,  "$L$"          , "Population value for peripheral compartment volume",
+  "$\\omega_{CL}$" , 0.3   , "-", "Standard deviation for IIV in $CL$",
+  "$\\omega_{V_c}$" , 0.25  , "-", "Standard deviation for IIV in $V_c$",
+  "$\\omega_{Q}$"  , 0.2   , "-", "Standard deviation for IIV in $Q$",
+  "$\\omega_{V_p}$" , 0.15  , "-", "Standard deviation for IIV in $V_p$",
+  "$\\rho_{CL,V_c}$" , 0.1, "-", "Correlation between $\\eta_{CL}$ and $\\eta_{V_c}$",
+  "$\\rho_{CL,Q}$"   , 0  , "-", "Correlation between $\\eta_{CL}$ and $\\eta_{Q}$",
+  "$\\rho_{CL,V_p}$" , 0.1, "-", "Correlation between $\\eta_{CL}$ and $\\eta_{V_p}$",
+  "$\\rho_{V_c,Q}$"  ,-0.1, "-", "Correlation between $\\eta_{V_c}$ and $\\eta_{Q}$",
+  "$\\rho_{V_c,V_p}$", 0.2, "-", "Correlation between $\\eta_{V_c}$ and $\\eta_{V_p}$",
+  "$\\rho_{Q,V_p}$"  ,0.15, "-", "Correlation between $\\eta_{Q}$ and $\\eta_{V_p}$",
+  "$\\sigma_p$"      , 0.2, "-", "Standard deviation for proportional residual error",
+  "$\\sigma_a$"      ,0.03, "$\\frac{\\mu g}{mL}$", "Standard deviation for additive residual error",
+  "$\\rho_{p,a}$"    , 0  , "-", "Correlation between $\\epsilon_p$ and $\\epsilon_a$",
+) %>%
+  knitr::kable(align = "lrcl", booktabs = TRUE,
+               caption = "True Parameter Values")
+
+```
+
+### Statistical Model
+
+I'll write down two models that are very similar with the only differences being the prior distributions on the population parameters.
+
+::: panel-tabset
+#### Half-Cauchy Priors
+
+In the interest of thoroughness and completeness, I'll write down the full statistical model. For this presentation, I'll just fit the data to the data-generating model. Letting \begin{align}
+\Omega &=
+\begin{pmatrix}
+\omega^2_{CL} & \omega_{CL, V_c} & \omega_{CL, Q} & \omega_{CL, V_p} \\
+\omega_{CL, V_c} & \omega^2_{V_c} & \omega_{V_c, Q} & \omega_{V_c, V_p} \\
+\omega_{CL, Q} & \omega_{V_c, Q} & \omega^2_{Q} & \omega_{Q, V_p} \\
+\omega_{CL, V_p} & \omega_{V_c, V_p} & \omega_{Q, V_p} & \omega^2_{V_p} \\
+\end{pmatrix} \\
+&= \begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix} \mathbf{R_{\Omega}}
+\begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix} \\
+&= \begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix}
+\begin{pmatrix}
+1 & \rho_{CL, V_c} & \rho_{CL, Q} & \rho_{CL, V_p} \\
+\rho_{CL, V_c} & 1 & \rho_{V_c, Q} & \rho_{V_c, V_p} \\
+\rho_{CL, Q} & \rho_{V_c, Q} & 1 & \rho_{Q, V_p} \\
+\rho_{CL, V_p} & \rho_{V_c, V_p} & \rho_{Q, V_p} & 1 \\
+\end{pmatrix}
+\begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix}
+\end{align} I'll model the *correlation matrix* $R_{\Omega}$ and *standard deviations* ($\omega_p$) of the random effects rather than the covariance matrix $\Omega$ that is typically done in NONMEM. The full statistical model is \begin{align}
+C_{ij} \mid \mathbf{TV}, \; \mathbf{\eta}_i, \; \mathbf{\Omega}, \; \mathbf{\Sigma}
+&\sim Normal\left( f(\mathbf{\theta}_i, t_{ij}), \; \sigma_{ij} \right)
+I(C_{ij} > 0) \notag \\
+\mathbf{\eta}_i \; | \; \Omega &\sim Normal\left(
+\begin{pmatrix}
+0 \\ 0 \\ 0 \\ 0 \\
+\end{pmatrix}
+, \; \Omega\right) \notag \\
+TVCL &\sim Half-Cauchy\left(0, scale_{TVCL}\right) \notag \\
+TVVC &\sim Half-Cauchy\left(0, scale_{TVVC}\right) \notag \\
+TVQ &\sim Half-Cauchy\left(0, scale_{TVQ}\right) \notag \\
+TVVP &\sim Half-Cauchy\left(0, scale_{TVVP}\right) \notag \\
+\omega_{CL} &\sim Half-Normal(0, scale_{\omega_{CL}}) \notag \\
+\omega_{V_c} &\sim Half-Normal(0, scale_{\omega_{V_c}}) \notag \\
+\omega_{Q} &\sim Half-Normal(0, scale_{\omega_{Q}}) \notag \\
+\omega_{V_p} &\sim Half-Normal(0, scale_{\omega_{V_p}}) \notag \\
+R_{\Omega} &\sim LKJ(df_{R_{\Omega}}) \notag \\
+\sigma_p &\sim Half-Normal(0, scale_{\sigma_p}) \\
+\sigma_a &\sim Half-Normal(0, scale_{\sigma_a}) \\
+R_{\Sigma} &\sim LKJ(df_{R_{\Sigma}}) \notag \\
+CL_i &= TVCL \times e^{\eta_{CL_i}} \notag \\
+V_{c_i} &= TVVC \times e^{\eta_{V_{c_i}}} \notag \\
+Q_i &= TVQ \times e^{\eta_{Q_i}} \notag \\
+V_{p_i} &= TVVP \times e^{\eta_{V_{p_i}}} \notag \\
+\end{align} where \begin{align}
+\mathbf{TV} &=
+\begin{pmatrix}
+TVCL \\ TVVC \\ TVQ \\ TVVP \\
+\end{pmatrix}, \;
+\mathbf{\theta}_i =
+\begin{pmatrix}
+CL_i \\ V_{c_i} \\ Q_i \\ V_{p_i} \\
+\end{pmatrix}, \;
+\mathbf{\eta}_i =
+\begin{pmatrix}
+\eta_{CL_i} \\ \eta_{V_{c_i}} \\ \eta_{Q_i} \\ \eta_{V_{p_i}} \\
+\end{pmatrix}, \;
+\mathbf{\Sigma} =
+\begin{pmatrix}
+\sigma^2_{p} & \rho_{p,a}\sigma_{p}\sigma_{a} \\
+\rho_{p,a}\sigma_{p}\sigma_{a} & \sigma^2_{z} \\
+\end{pmatrix} \\
+\sigma_{ij} &= \sqrt{f(\mathbf{\theta}_i, t_{ij})^2\sigma^2_p + \sigma^2_a + 2f(\mathbf{\theta}_i, t_{ij})\rho_{p,a}\sigma_{p}\sigma_{a}}
+\end{align} Note: The indicator for $C_{ij} | \ldots$ indicates that we are truncating the distribution of the observed concentrations to be greater than 0.
+
+#### Lognormal Priors
+
+In the interest of thoroughness and completeness, I'll write down the full statistical model. For this presentation, I'll just fit the data to the data-generating model. Letting \begin{align}
+\Omega &=
+\begin{pmatrix}
+\omega^2_{CL} & \omega_{CL, V_c} & \omega_{CL, Q} & \omega_{CL, V_p} \\
+\omega_{CL, V_c} & \omega^2_{V_c} & \omega_{V_c, Q} & \omega_{V_c, V_p} \\
+\omega_{CL, Q} & \omega_{V_c, Q} & \omega^2_{Q} & \omega_{Q, V_p} \\
+\omega_{CL, V_p} & \omega_{V_c, V_p} & \omega_{Q, V_p} & \omega^2_{V_p} \\
+\end{pmatrix} \\
+&= \begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix} \mathbf{R_{\Omega}}
+\begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix} \\
+&= \begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix}
+\begin{pmatrix}
+1 & \rho_{CL, V_c} & \rho_{CL, Q} & \rho_{CL, V_p} \\
+\rho_{CL, V_c} & 1 & \rho_{V_c, Q} & \rho_{V_c, V_p} \\
+\rho_{CL, Q} & \rho_{V_c, Q} & 1 & \rho_{Q, V_p} \\
+\rho_{CL, V_p} & \rho_{V_c, V_p} & \rho_{Q, V_p} & 1 \\
+\end{pmatrix}
+\begin{pmatrix}
+\omega_{CL} & 0 & 0 & 0 \\
+0 & \omega_{V_c} & 0 & 0 \\
+0 & 0 & \omega_{Q} & 0 \\
+0 & 0 & 0 & \omega_{V_p} \\
+\end{pmatrix}
+\end{align} I'll model the *correlation matrix* $R_{\Omega}$ and *standard deviations* ($\omega_p$) of the random effects rather than the covariance matrix $\Omega$ that is typically done in NONMEM. The full statistical model is \begin{align}
+C_{ij} \mid \mathbf{TV}, \; \mathbf{\eta}_i, \; \mathbf{\Omega}, \; \mathbf{\Sigma}
+&\sim Normal\left( f(\mathbf{\theta}_i, t_{ij}), \; \sigma_{ij} \right)
+I(C_{ij} > 0) \notag \\
+\mathbf{\eta}_i \; | \; \Omega &\sim Normal\left(
+\begin{pmatrix}
+0 \\ 0 \\ 0 \\ 0 \\
+\end{pmatrix}
+, \; \Omega\right) \notag \\
+TVCL &\sim Lognormal\left(log\left(location_{TVCL}\right), scale_{TVCL}\right) \notag \\
+TVVC &\sim Lognormal\left(log\left(location_{TVVC}\right), scale_{TVVC}\right) \notag \\
+TVQ &\sim Lognormal\left(log\left(location_{TVQ}\right), scale_{TVQ}\right) \notag \\
+TVVP &\sim Lognormal\left(log\left(location_{TVVP}\right), scale_{TVVP}\right) \notag \\
+\omega_{CL} &\sim Half-Normal(0, scale_{\omega_{CL}}) \notag \\
+\omega_{V_c} &\sim Half-Normal(0, scale_{\omega_{V_c}}) \notag \\
+\omega_{Q} &\sim Half-Normal(0, scale_{\omega_{Q}}) \notag \\
+\omega_{V_p} &\sim Half-Normal(0, scale_{\omega_{V_p}}) \notag \\
+R_{\Omega} &\sim LKJ(df_{R_{\Omega}}) \notag \\
+\sigma_p &\sim Half-Normal(0, scale_{\sigma_p}) \\
+\sigma_a &\sim Half-Normal(0, scale_{\sigma_a}) \\
+R_{\Sigma} &\sim LKJ(df_{R_{\Sigma}}) \notag \\
+CL_i &= TVCL \times e^{\eta_{CL_i}} \notag \\
+V_{c_i} &= TVVC \times e^{\eta_{V_{c_i}}} \notag \\
+Q_i &= TVQ \times e^{\eta_{Q_i}} \notag \\
+V_{p_i} &= TVVP \times e^{\eta_{V_{p_i}}} \notag \\
+\end{align} where \begin{align}
+\mathbf{TV} &=
+\begin{pmatrix}
+TVCL \\ TVVC \\ TVQ \\ TVVP \\
+\end{pmatrix}, \;
+\mathbf{\theta}_i =
+\begin{pmatrix}
+CL_i \\ V_{c_i} \\ Q_i \\ V_{p_i} \\
+\end{pmatrix}, \;
+\mathbf{\eta}_i =
+\begin{pmatrix}
+\eta_{CL_i} \\ \eta_{V_{c_i}} \\ \eta_{Q_i} \\ \eta_{V_{p_i}} \\
+\end{pmatrix}, \;
+\mathbf{\Sigma} =
+\begin{pmatrix}
+\sigma^2_{p} & \rho_{p,a}\sigma_{p}\sigma_{a} \\
+\rho_{p,a}\sigma_{p}\sigma_{a} & \sigma^2_{z} \\
+\end{pmatrix} \\
+\sigma_{ij} &= \sqrt{f(\mathbf{\theta}_i, t_{ij})^2\sigma^2_p + \sigma^2_a + 2f(\mathbf{\theta}_i, t_{ij})\rho_{p,a}\sigma_{p}\sigma_{a}}
+\end{align} Note: The indicator for $C_{ij} | \ldots$ indicates that we are truncating the distribution of the observed concentrations to be greater than 0.
+:::
+
+Note that for both of these models, I've used the non-centered parameterization (see [here](https://arxiv.org/pdf/1312.0906.pdf) for more information on why the non-centered parameterization is often better from an MCMC algorithm standpoint), which is what we commonly use in the pharmacometrics world. You may also see the centered parameterization[^poppk-6]. Also note[^poppk-7] and[^poppk-8].
+
+[^poppk-6]: For a typical statistical model, we would write the centered parameterization like this: \begin{align}
+    Y_{ij} \mid \theta_i &\sim Normal\left(\theta_i, \sigma^2\right) \notag \\
+    \theta_i &\sim Normal\left(\mu, \omega^2\right) \notag \\
+    \end{align} The non-centered parameterization would be \begin{align}
+    Y_{ij} \mid \eta_i &\sim Normal\left(\theta_i, \sigma^2\right) \notag \\
+    \eta_i &\sim Normal(0, \omega^2) \notag \\
+    \theta_i &= \mu + \eta_i \notag \\
+    \end{align} For our PK model, we would write the centered parameterization \begin{align}
+    C_{ij} \mid CL_i, V_{c_i}, Q_i, V_{p_i}, \; \mathbf{\Omega}, \; \mathbf{\Sigma}
+    &\sim Normal\left( f(\mathbf{\theta}_i, t_{ij}), \; \sigma_{ij} \right)
+    I(C_{ij} > 0) \notag \\
+    CL_i \mid TVCL &\sim Lognormal\left(\log(TVCL), \omega^2_{CL}\right) \notag \\
+    V_{c_i} \mid TVVC &\sim Lognormal\left(\log(TVVC), \omega^2_{V_c}\right) \notag \\
+    Q_i \mid TVQ &\sim Lognormal\left(\log(TVQ), \omega^2_{Q}\right) \notag \\
+    V_{p_i} \mid TVVP &\sim Lognormal\left(\log(TVVP), \omega^2_{V_p}\right) \notag \\
+    \end{align}
+
+[^poppk-7]: In practice, the correlation matrix is parameterized as the lower triangular factor of the Cholesky decomposition of the correlation matrix for numerical stability.
+
+[^poppk-8]: In practice, the multivariate-normal $\mathbf{\eta}$ is created by sampling from a multivariate standard normal and multiplying it by the standard deviations and Cholesky decomposition of the correlation matrix. $$\mathbf{\eta} =
+    \begin{pmatrix}
+    \omega_{CL} & 0 & 0 & 0 \\
+    0 & \omega_{V_c} & 0 & 0 \\
+    0 & 0 & \omega_{Q} & 0 \\
+    0 & 0 & 0 & \omega_{V_p} \\
+    \end{pmatrix}
+    \mathbf{LZ}$$ where $\mathbf{L}$ is the lower triangular factor of the Cholesky decomposition of the correlation matrix and $\mathbf{Z}$ is a vector of standard normals.
+
+### Data
+
+As mentioned previously, we can simulate data directly in Stan with Torsten. For this example, we will simulate 24 individuals total, 3 subjects at each of *5 mg Q4W, 10 mg Q4W, 20 mg Q4W, 50 mg Q4W, 100 mg Q4W, 200 mg Q4W, 400 mg Q4W,* and *800 mg Q4W* for 24 weeks (6 cycles), where each dose is a 1-hour infusion. We take observations at nominal times *1, 3, 5, 24, 72, 168,* and *336 hours* after the first and second doses, and then trough measurements just before the last 4 doses.
+
+Here is the Stan code with Torsten functions used to simulate the data:
+
+```{r iv-2cmt-simulate-model, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+model_simulate <- cmdstan_model("Torsten/Simulate/iv_2cmt_ppa.stan")
+
+model_simulate$print()
+
+```
+
+::: panel-tabset
+#### Simulating a Dataset on a Grid
+
+For testing and illustration purposes, we often simulate a simple dataset where every subject is dosed and observed on a grid of nominal times[^poppk-9]:
+
+```{r iv-2cmt-simulate-grid, cache=TRUE, max.height='300px', results='hide', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+check_valid_cov_mat <- function(x){
+
+  if(!is.matrix(x)) stop("'Matrix' is not a matrix.")
+  if(!is.numeric(x)) stop("Matrix is not numeric.")
+  if(!(nrow(x) == ncol(x))) stop("Matrix is not square.")
+  # if(!(sum(x == t(x)) == (nrow(x)^2)))
+  #   stop("Matrix is not symmetric")
+  if(!(isTRUE(all.equal(x, t(x)))))
+    stop("Matrix is not symmetric.")
+
+  eigenvalues <- eigen(x, only.values = TRUE)$values
+  eigenvalues[abs(eigenvalues) < 1e-8] <- 0
+  if(any(eigenvalues < 0)){
+    stop("Matrix is not positive semi-definite.")
+  }
+
+  return(TRUE)
+}
+
+check_valid_cor_mat <- function(x){
+
+  if(any(diag(x) != 1)) stop("Diagonal of matrix is not all 1s.")
+  check_valid_cov_mat(x)
+
+  return(TRUE)
+}
+
+create_dosing_data <- function(n_subjects_per_dose = 6,
+                               dose_amounts = c(100, 200, 400),
+                               addl = 5, ii = 28, cmt = 2, tinf = 1,
+                               sd_min_dose = 0){
+
+  dosing_data <- expand.ev(ID = 1:n_subjects_per_dose, addl = addl, ii = ii,
+                           cmt = cmt, amt = dose_amounts, tinf = tinf,
+                           evid = 1) %>%
+    realize_addl() %>%
+    as_tibble() %>%
+    rename_all(toupper) %>%
+    rowwise() %>%
+    mutate(TIMENOM = TIME,
+           TIME = if_else(TIMENOM == 0, TIMENOM,
+                          TIMENOM + rnorm(1, 0, sd_min_dose/(60*24)))) %>%
+    ungroup() %>%
+    select(ID, TIMENOM, TIME, everything())
+
+  return(dosing_data)
+
+}
+
+create_nonmem_data <- function(dosing_data,
+                               sd_min_obs = 3,
+                               times_to_simulate = seq(0, 96, 1),
+                               times_obs = seq(0, 96, 1)){
+
+  data_set_obs <- tibble(TIMENOM = times_obs)
+  data_set_all <- tibble(TIMENOM = times_to_simulate)
+
+  data_set_times_obs <- create_times_nm(dosing_data, data_set_obs,
+                                        sd_min_obs) %>%
+    select(ID, TIMENOM, TIME, NONMEM)
+
+  data_set_times_pred <- bind_rows(replicate(max(dosing_data$ID),
+                                             data_set_all,
+                                             simplify = FALSE)) %>%
+    mutate(ID = rep(1:max(dosing_data$ID), each = nrow(data_set_all)),
+           TIME = TIMENOM,
+           NONMEM = FALSE) %>%
+    select(ID, TIMENOM, TIME, NONMEM)
+
+  data_set_times_all <- bind_rows(data_set_times_obs, data_set_times_pred) %>%
+    arrange(ID, TIME) %>%
+    select(ID, TIMENOM, TIME, NONMEM) %>%
+    mutate(CMT = 2,
+           EVID = 0,
+           AMT = NA_real_,
+           MDV = 0,
+           RATE = 0,
+           II = 0,
+           ADDL = 0)
+
+  nonmem_data_set <- bind_rows(data_set_times_all,
+                               dosing_data %>%
+                                 mutate(NONMEM = TRUE)) %>%
+    arrange(ID, TIME, EVID) %>%
+    filter(!(CMT == 2 & EVID == 0 & TIME == 0))
+
+  return(nonmem_data_set)
+
+}
+
+dosing_data <- expand.ev(ID = 1:3, addl = 5, ii = 28,
+                         cmt = 2, amt = c(5, 10, 20, 50, 100,
+                                          200, 400, 800),
+                         tinf = 1/24, evid = 1) %>%
+  realize_addl() %>%
+  as_tibble() %>%
+  rename_all(toupper) %>%
+  select(ID, TIME, everything())
+
+TVCL <- 0.2 # L/d
+TVVC <- 3   # L
+TVQ <- 1.4  # L/d
+TVVP <- 4   # L
+
+omega_cl <- 0.30
+omega_vc <- 0.25
+omega_q <- 0.2
+omega_vp <- 0.15
+
+R <- matrix(1, nrow = 4, ncol = 4)
+R[1, 2] <- R[2, 1] <- cor_cl_vc <- 0.1
+R[1, 3] <- R[3, 1] <- cor_cl_q <- 0
+R[1, 4] <- R[4, 1] <- cor_cl_vp <- 0.1
+R[2, 3] <- R[3, 2] <- cor_vc_q <- -0.1
+R[2, 4] <- R[4, 2] <- cor_vc_vp <- 0.2
+R[3, 4] <- R[4, 3] <- cor_q_vp <- 0.15
+
+times_to_simulate <- seq(12/24, max(dosing_data$TIME) + 28, by = 12/24)
+times_obs <- c(c(1, 3, 5, 24, 72, 168, 336)/24, 28 +
+                 c(0, 1, 3, 5, 24, 72, 168, 336)/24,
+               seq(56, max(dosing_data$TIME) + 28, by = 28))
+times_all <- sort(unique(c(times_to_simulate, times_obs)))
+
+times_new <- tibble(time = times_all)
+
+nonmem_data_simulate <- bind_rows(replicate(max(dosing_data$ID), times_new,
+                                            simplify = FALSE)) %>%
+  mutate(ID = rep(1:max(dosing_data$ID), each = nrow(times_new)),
+         amt = 0,
+         evid = 0,
+         rate = 0,
+         addl = 0,
+         ii = 0,
+         cmt = 2,
+         mdv = 0,
+         ss = 0,
+         nonmem = if_else(time %in% times_obs, TRUE, FALSE)) %>%
+  select(ID, time, everything()) %>%
+  bind_rows(dosing_data %>%
+              rename_all(tolower) %>%
+              rename(ID = "id") %>%
+              mutate(ss = 0,
+                     nonmem = TRUE)) %>%
+  arrange(ID, time)
+
+n_subjects <- nonmem_data_simulate %>%  # number of individuals to simulate
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_total <- nrow(nonmem_data_simulate) # total number of time points at which to predict
+
+subj_start <- nonmem_data_simulate %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+stan_data_simulate <- list(n_subjects = n_subjects,
+                           n_total = n_total,
+                           amt = nonmem_data_simulate$amt,
+                           cmt = nonmem_data_simulate$cmt,
+                           evid = nonmem_data_simulate$evid,
+                           rate = nonmem_data_simulate$rate,
+                           ii = nonmem_data_simulate$ii,
+                           addl = nonmem_data_simulate$addl,
+                           ss = nonmem_data_simulate$ss,
+                           time = nonmem_data_simulate$time,
+                           subj_start = subj_start,
+                           subj_end = subj_end,
+                           TVCL = TVCL,
+                           TVVC = TVVC,
+                           TVQ = TVQ,
+                           TVVP = TVVP,
+                           omega_cl = omega_cl,
+                           omega_vc = omega_vc,
+                           omega_q = omega_q,
+                           omega_vp = omega_vp,
+                           R = R,
+                           sigma_p = 0.2,
+                           sigma_a = 0.05,
+                           cor_p_a = 0)
+
+simulated_data_grid <- model_simulate$sample(data = stan_data_simulate,
+                                        fixed_param = TRUE,
+                                        seed = 112358,
+                                        iter_warmup = 0,
+                                        iter_sampling = 1,
+                                        chains = 1,
+                                        parallel_chains = 1)
+
+data_grid <- simulated_data_grid$draws(c("cp", "dv"), format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>%
+  ungroup() %>%
+  mutate(time = nonmem_data_simulate$time[i],
+         ID = factor(nonmem_data_simulate$ID[i])) %>%
+  select(ID, time, cp, dv)
+
+nonmem_data_observed_grid <- nonmem_data_simulate %>%
+  mutate(DV = data_grid$dv,
+         mdv = if_else(evid == 1, 1, 0),
+         ID = factor(ID)) %>%
+  filter(nonmem == TRUE) %>%
+  select(-nonmem, -tinf) %>%
+  rename_all(toupper) %>%
+  mutate(DV = if_else(EVID == 1, NA_real_, DV))
+```
+
+```{r depot-2cmt-data-grid-table, cache=TRUE}
+nonmem_data_observed_grid %>%
+  mutate(across(where(is.double), round, 3)) %>%
+  DT::datatable(rownames = FALSE, filter = "top",
+                options = list(scrollX = TRUE,
+                               columnDefs = list(list(className = 'dt-center',
+                                                      targets = "_all"))))
+
+```
+
+#### Simulating a Realistic Dataset with Jittered Time
+
+In reality, while doses and observations are scheduled at a nominal time, they tend to be off by a few minutes, and sometimes the observations are not made at all. So to make our dataset a bit more realistic, I have added a bit of jitter around the nominal time so that the subjects are taking their dose or getting their measurements in the neighborhood of the nominal time, rather than at the *exact* nominal time. I've also randomly removed an observation or two from some of the subjects[^poppk-10].
+
+```{r iv-2cmt-simulate-jitter, cache=TRUE, max.height='300px', results='hide', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+# Check if the NONMEM times are ok (ordered by time within an individual).
+# Nominal time is automatically ok. This checks that the true measurement
+# time is ordered within an individual
+# Check if the NONMEM times are ok (ordered by time within an individual).
+# Nominal time is automatically ok. This checks that the true measurement
+# time is ordered within an individual
+check_times_nm <- function(data_set_times_nm){
+
+  minimum <- data_set_times_nm %>%
+    group_by(ID) %>%
+    mutate(across(TIME, ~.x - lag(.x))) %>%
+    ungroup() %>%
+    na.omit() %>%
+    summarize(min_time = min(TIME)) %>%
+    deframe() %>%
+    min
+
+  not_ok <- (minimum < 0)
+  return(not_ok)
+
+}
+
+# Simulate times to be slightly different from nominal time for something a bit
+# more realistic. It'll check that the times are ordered within individuals so
+# the time vector can be plugged into NONMEM and Stan. Trough measurements
+# should come shortly before a dose, and measurements at the end of infusion
+# should come slightly after the end of infusion
+create_times_nm <- function(dosing_data, data_set_tmp, sd_min){
+
+  not_ok <- TRUE
+  while(not_ok){
+
+    data_set_times_nm <- bind_rows(replicate(max(dosing_data$ID), data_set_tmp,
+                                             simplify = FALSE)) %>%
+      mutate(ID = rep(1:max(dosing_data$ID), each = nrow(data_set_tmp))) %>%
+      full_join(dosing_data %>%
+                  select(ID, TIMENOM, TIME, AMT, EVID, TINF),
+                by = c("TIMENOM", "ID")) %>%
+      arrange(ID, TIMENOM) %>%
+      mutate(end_inf_timenom = TIMENOM + TINF,
+             end_inf = (TIMENOM %in% end_inf_timenom),
+             AMT = if_else(is.na(AMT), 0, AMT),
+             tmp_g = cumsum(c(FALSE, as.logical(diff(AMT)))),
+             num_doses_taken = cumsum(as.logical(AMT > 0))) %>%
+      group_by(ID) %>%
+      mutate(tmp_a = c(0, diff(TIMENOM)) * !AMT) %>%
+      group_by(tmp_g) %>%
+      mutate(NTSLD = cumsum(tmp_a)) %>%
+      ungroup() %>%
+      group_by(ID, num_doses_taken) %>%
+      mutate(time_prev_dose = unique(TIME[!is.na(TIME)])) %>%
+      ungroup() %>%
+      rowwise() %>%
+      mutate(TIME = case_when((TIMENOM == 0 && EVID == 1) ~ 0, # First time is time 0
+                              (TIMENOM > 0 && EVID == 1) ~       # trough measurement. Make sure
+                                time_prev_dose - abs(rnorm(1, 0, # it's before the new dose
+                                                           sd_min/(60*24))),
+                              (TIMENOM > 0 && end_inf == TRUE && is.na(EVID)) ~ # End of infusion.
+                                time_prev_dose + NTSLD +                        # Make sure it's after
+                                abs(rnorm(1, 0, sd_min/(60*24))),               # end of infusion
+                              (TIMENOM > 0 && end_inf == FALSE && is.na(EVID)) ~ # Everything else
+                                time_prev_dose + NTSLD +
+                                rnorm(1, 0, sd_min/(60*24)),
+                              TRUE ~ NA_real_)) %>%
+      ungroup() %>%
+      select(ID, TIMENOM, TIME) %>%
+      mutate(NONMEM = TRUE)
+
+    not_ok <- check_times_nm(data_set_times_nm)
+  }
+  return(data_set_times_nm)
+}
+
+create_cor_mat <- function(...){
+
+  args <- list(...)
+
+  for(i in 1:length(args)) {
+    assign(x = names(args)[i], value = args[[i]])
+  }
+
+  x <- matrix(1, ncol = 5, nrow = 5)
+  x[2, 1] <- x[1, 2] <- cor_cl_vc
+  x[3, 1] <- x[1, 3] <- cor_cl_q
+  x[4, 1] <- x[1, 4] <- cor_cl_vp
+  x[3, 2] <- x[2, 3] <- cor_vc_q
+  x[4, 2] <- x[2, 4] <- cor_vc_vp
+  x[4, 3] <- x[3, 4] <- cor_q_vp
+
+  return(x)
+}
+
+check_valid_cov_mat <- function(x){
+
+  if(!is.matrix(x)) stop("'Matrix' is not a matrix.")
+  if(!is.numeric(x)) stop("Matrix is not numeric.")
+  if(!(nrow(x) == ncol(x))) stop("Matrix is not square.")
+  # if(!(sum(x == t(x)) == (nrow(x)^2)))
+  #   stop("Matrix is not symmetric")
+  if(!(isTRUE(all.equal(x, t(x)))))
+    stop("Matrix is not symmetric.")
+
+  eigenvalues <- eigen(x, only.values = TRUE)$values
+  eigenvalues[abs(eigenvalues) < 1e-8] <- 0
+  if(any(eigenvalues < 0)){
+    stop("Matrix is not positive semi-definite.")
+  }
+
+  return(TRUE)
+}
+
+check_valid_cor_mat <- function(x){
+
+  if(any(diag(x) != 1)) stop("Diagonal of matrix is not all 1s.")
+  check_valid_cov_mat(x)
+
+  return(TRUE)
+}
+
+create_dosing_data <- function(n_subjects_per_dose = 6,
+                               dose_amounts = c(100, 200, 400),
+                               addl = 5, ii = 28, cmt = 2, tinf = 1/24,
+                               sd_min_dose = 0){
+
+  dosing_data <- expand.ev(ID = 1:n_subjects_per_dose, addl = addl, ii = ii,
+                           cmt = cmt, amt = dose_amounts, tinf = tinf,
+                           evid = 1) %>%
+    realize_addl() %>%
+    as_tibble() %>%
+    rename_all(toupper) %>%
+    rowwise() %>%
+    mutate(TIMENOM = TIME,
+           TIME = if_else(TIMENOM == 0, TIMENOM,
+                          TIMENOM + rnorm(1, 0, sd_min_dose/(60*24)))) %>%
+    ungroup() %>%
+    select(ID, TIMENOM, TIME, everything())
+
+  return(dosing_data)
+
+}
+
+create_nonmem_data <- function(dosing_data,
+                               sd_min_obs = 3,
+                               times_to_simulate = seq(0, 96, 1),
+                               times_obs = seq(0, 96, 1)){
+
+  data_set_obs <- tibble(TIMENOM = times_obs)
+  data_set_all <- tibble(TIMENOM = times_to_simulate)
+
+  data_set_times_obs <- create_times_nm(dosing_data, data_set_obs,
+                                        sd_min_obs) %>%
+    select(ID, TIMENOM, TIME, NONMEM)
+
+  data_set_times_pred <- bind_rows(replicate(max(dosing_data$ID),
+                                             data_set_all,
+                                             simplify = FALSE)) %>%
+    mutate(ID = rep(1:max(dosing_data$ID), each = nrow(data_set_all)),
+           TIME = TIMENOM,
+           NONMEM = FALSE) %>%
+    select(ID, TIMENOM, TIME, NONMEM)
+
+  data_set_times_all <- bind_rows(data_set_times_obs, data_set_times_pred) %>%
+    arrange(ID, TIME) %>%
+    select(ID, TIMENOM, TIME, NONMEM) %>%
+    mutate(CMT = 2,
+           EVID = 0,
+           AMT = NA_real_,
+           MDV = 0,
+           RATE = 0,
+           II = 0,
+           ADDL = 0)
+
+  nonmem_data_set <- bind_rows(data_set_times_all,
+                               dosing_data %>%
+                                 mutate(NONMEM = TRUE)) %>%
+    arrange(ID, TIME, EVID) %>%
+    filter(!(CMT == 2 & EVID == 0 & TIME == 0))
+
+  return(nonmem_data_set)
+
+}
+
+
+dosing_data <- create_dosing_data(n_subjects_per_dose = 3,
+                                  dose_amounts = c(5, 10, 20, 50, 100,
+                                                   200, 400, 800), # mg
+                                  addl = 5, ii = 28, cmt = 2, tinf = 1/24,
+                                  sd_min_dose = 5)
+
+TVCL <- 0.2 # L/d
+TVVC <- 3   # L
+TVQ <- 1.4  # L/d
+TVVP <- 4   # L
+
+omega_cl <- 0.30
+omega_vc <- 0.25
+omega_q <- 0.2
+omega_vp <- 0.15
+
+R <- matrix(1, nrow = 4, ncol = 4)
+R[1, 2] <- R[2, 1] <- cor_cl_vc <- 0.1
+R[1, 3] <- R[3, 1] <- cor_cl_q <- 0
+R[1, 4] <- R[4, 1] <- cor_cl_vp <- 0.1
+R[2, 3] <- R[3, 2] <- cor_vc_q <- -0.1
+R[2, 4] <- R[4, 2] <- cor_vc_vp <- 0.2
+R[3, 4] <- R[4, 3] <- cor_q_vp <- 0.15
+
+sd_min_obs <- 5 # standard deviation in minutes for the observed true time
+                # around the nominal time
+
+times_to_simulate <- seq(0, max(dosing_data$TIMENOM) + 28, by = 12/24)
+times_obs <- c(c(1, 3, 5, 24, 72, 168, 336)/24, 28 +
+                 c(0, 1, 3, 5, 24, 72, 168, 336)/24,
+               seq(56, max(dosing_data$TIMENOM) + 28, by = 28))
+
+nonmem_data_simulate <- create_nonmem_data(
+  dosing_data,
+  sd_min_obs = sd_min_obs,
+  times_to_simulate = times_to_simulate,
+  times_obs = times_obs) %>%
+  rename_all(tolower) %>%
+  rename(ID = "id") %>%
+  mutate(ss = 0,
+         amt = if_else(is.na(amt), 0, amt))
+
+n_subjects <- nonmem_data_simulate %>%  # number of individuals to simulate
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_total <- nrow(nonmem_data_simulate) # total number of time points at which to predict
+
+subj_start <- nonmem_data_simulate %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+stan_data_simulate <- list(n_subjects = n_subjects,
+                           n_total = n_total,
+                           amt = nonmem_data_simulate$amt,
+                           cmt = nonmem_data_simulate$cmt,
+                           evid = nonmem_data_simulate$evid,
+                           rate = nonmem_data_simulate$rate,
+                           ii = nonmem_data_simulate$ii,
+                           addl = nonmem_data_simulate$addl,
+                           ss = nonmem_data_simulate$ss,
+                           time = nonmem_data_simulate$time,
+                           subj_start = subj_start,
+                           subj_end = subj_end,
+                           TVCL = TVCL,
+                           TVVC = TVVC,
+                           TVQ = TVQ,
+                           TVVP = TVVP,
+                           omega_cl = omega_cl,
+                           omega_vc = omega_vc,
+                           omega_q = omega_q,
+                           omega_vp = omega_vp,
+                           R = R,
+                           sigma_p = 0.2,
+                           sigma_a = 0.05,
+                           cor_p_a = 0)
+
+simulated_data <- model_simulate$sample(data = stan_data_simulate,
+                                        fixed_param = TRUE,
+                                        seed = 112358,
+                                        iter_warmup = 0,
+                                        iter_sampling = 1,
+                                        chains = 1,
+                                        parallel_chains = 1)
+
+data <- simulated_data$draws(c("cp", "dv"), format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>%
+  ungroup() %>%
+  mutate(time = nonmem_data_simulate$time[i],
+         ID = factor(nonmem_data_simulate$ID[i])) %>%
+  select(ID, time, cp, dv)
+
+nonmem_data_observed_tmp <- nonmem_data_simulate %>%
+  mutate(DV = data$dv,
+         mdv = if_else(evid == 1, 1, 0),
+         ID = factor(ID)) %>%
+  filter(nonmem == TRUE) %>%
+  select(-nonmem, -tinf)
+
+nonmem_data_observed <- nonmem_data_observed_tmp %>%
+  filter(evid == 0) %>%
+  group_by(ID) %>%
+  nest() %>%
+  mutate(num_rows_to_remove = rbinom(1, size = 2, prob = 0.5)) %>%
+  ungroup() %>%
+  mutate(num_rows = map_dbl(data, nrow),
+         num_rows_to_keep = num_rows - num_rows_to_remove,
+         sample = map2(data, num_rows_to_keep, sample_n)) %>%
+  unnest(sample) %>%
+  select(ID, everything(), -data, -starts_with("num_rows")) %>%
+  bind_rows(nonmem_data_observed_tmp %>%
+              filter(evid == 1)) %>%
+  arrange(ID, time) %>%
+  rename_all(toupper) %>%
+  mutate(DV = if_else(EVID == 1, NA_real_, DV))
+```
+
+<!-- ```{r write-iv-2cmt-data-jitter, cache=TRUE, echo=FALSE, include=FALSE, eval=FALSE} -->
+
+<!-- nonmem_data_observed %>% -->
+
+<!--   write_csv("Data/iv_2cmt_no_bloq.csv", na = ".") -->
+
+<!-- ``` -->
+
+```{r iv-2cmt-data-jitter-table, cache=TRUE}
+nonmem_data_observed %>%
+  mutate(across(where(is.double), round, 3)) %>%
+  DT::datatable(rownames = FALSE, filter = "top",
+                options = list(scrollX = TRUE,
+                               columnDefs = list(list(className = 'dt-center',
+                                                      targets = "_all"))))
+
+```
+:::
+
+[^poppk-9]: Note that this code below also simulates a dense grid that we could look at for visualization purposes, but I go ahead and filter those out since I'm only going to fit the data observed at the nominal timepoints given above
+
+[^poppk-10]: The reason I do this here is to show that we don't need a grid of time points or the same number of observations per subject. Stan is flexible and can work with whatever dataset you have.
+
+Now that we have simulated a simple dataset on a grid and another dataset that is a bit more realistic that has missed observations and dosing and sampling times that are slightly off from nominal time, we will continue the rest of this discussion using the more realistic dataset.
+
+We can visualize the observed data in the NONMEM data set that we will be modeling (with dosing events marked with a magenta dashed line):
+
+::: vscroll-plot1
+```{r plot-iv-2cmt-jitter-1, cache=TRUE, fig.height=25, fig.width=15, class.output="remark-slide-scaler"}
+
+(p1 <- ggplot(nonmem_data_observed %>%
+                mutate(ID = factor(ID)) %>%
+                group_by(ID) %>%
+                mutate(Dose = factor(max(AMT, na.rm = TRUE))) %>%
+                ungroup() %>%
+                filter(MDV == 0)) +
+  geom_line(mapping = aes(x = TIME, y = DV, group = ID, color = Dose)) +
+  geom_point(mapping = aes(x = TIME, y = DV, group = ID, color = Dose)) +
+  scale_color_discrete(name = "Dose (mg)") +
+  scale_y_log10(name = latex2exp::TeX("$Drug Conc. \\; (\\mu g/mL)$"),
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw(18) +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.line = element_line(size = 2),
+        legend.position = "bottom") +
+  geom_vline(data = nonmem_data_observed %>%
+               mutate(ID = factor(ID)) %>%
+               filter(EVID == 1),
+             mapping = aes(xintercept = TIME, group = ID),
+             linetype = 2, color = "magenta", alpha = 0.5) +
+  facet_wrap(~ID, labeller = label_both, ncol = 3, scales = "free_y"))
+
+```
+:::
+
+### Eliciting Prior Information
+
+The use of the prior distribution can range from being a nuisance that serves simply as a catalyst that allows us to express uncertainty via Bayes' theorem to a means to stabilize the sampling algorithm to actually incorporating knowledge about the parameter(s) before collecting data. We will discuss a couple common methods for eliciting prior information and setting your prior distributions.
+
+#### Drug Class and/or Historical Information
+
+A simple method that I'll show here is to look at other drugs in the same class. For this example I used "true" PK parameters that are similar to a monoclonal antibody (mAb) I've worked on in the past to simulate this data. Since this fictional drug is a mAb, I can look at [this paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6226118/pdf/CTS-11-540.pdf) to see a review of published clearances and volumes of distribution for other mAbs:
+
+<center>![](Figures/mab_values.png)</center>
+
+I will set my priors in such a way that there is plenty of prior mass over the values that we've previously seen in mAbs (in red) but not so wide that the sampler will go looking at non-sensical values like $CL = 300 \frac{L}{d}$
+
+$$\begin{align}
+TVCL &\sim Half-Cauchy\;(0, \; 2) \notag \\
+TVVC &\sim Half-Cauchy\;(0, \; 10)
+\end{align}$$
+
+```{r mab-prior, cache=TRUE, fig.height=4, fig.width=8, echo=TRUE, fig.show = 'asis', fig.retina = 3}
+
+my_length <- 200
+
+dens_data <- tibble(parameter = rep(c("TVCL", "TVVC"), each = my_length),
+                    value = c(seq(0, 10, length.out = my_length),
+                              seq(0, 40, length.out = my_length))) %>%
+  bind_rows(tibble(parameter = rep(c("TVCL", "TVVC"), each = 2),
+                   value = c(0.09, 0.56, 3, 8))) %>%
+  arrange(parameter, value) %>%
+  mutate(scale = if_else(parameter == "TVCL", 2, 10),
+         dens = dcauchy(value, scale = scale)/pcauchy(0, scale = scale))
+
+p_cl <- ggplot(data = dens_data %>%
+                 filter(parameter == "TVCL"),
+               aes(x = value, y = dens, group = parameter)) +
+  geom_line(size = 1.25) +
+  theme_bw(18) +
+  geom_area(mapping = aes(x = if_else(between(value, 0.09, 0.56), value, 0)),
+            fill = "red") +
+  scale_y_continuous(name = "Density",
+                     limits = c(0, 0.34),
+                     expand = c(0, 0)) +
+  scale_x_continuous(name = "Clearance (L/d)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 10, by = 2.5),
+                     labels = c("0", "2.5", "5", "7.5", "10"))
+
+p_vc <- ggplot(data = dens_data %>%
+                 filter(parameter == "TVVC"),
+               aes(x = value, y = dens, group = parameter)) +
+  geom_line(size = 1.25) +
+  theme_bw(18) +
+  geom_area(mapping = aes(x = if_else(between(value, 3, 8), value, 0)),
+            fill = "red") +
+  scale_y_continuous(name = "Density",
+                     limits = c(0, 0.07),
+                     expand = c(0, 0)) +
+  scale_x_continuous(name = "Volume (L)",
+                     expand = c(0, 0))
+p_cl | p_vc
+```
+
+This could also be done with lognormal prior distributions (which might be a little more familiar in the PK/PD world):$$\begin{align}
+TVCL &\sim Lognormal\;(log(0.5), \; 1) \notag \\
+TVVC &\sim Lognormal\;(log(6), \; 1)
+\end{align}$$
+
+```{r mab-prior-2, cache=TRUE, fig.height=4, fig.width=8, echo=TRUE, fig.show = 'asis', fig.retina = 3}
+
+dens_data_2 <- tibble(parameter = rep(c("TVCL", "TVVC"), each = my_length),
+                      value = c(seq(0, 5, length.out = my_length),
+                                seq(0, 40, length.out = my_length))) %>%
+  bind_rows(tibble(parameter = rep(c("TVCL", "TVVC"), each = 2),
+                   value = c(0.09, 0.56, 3, 8))) %>%
+  arrange(parameter, value) %>%
+  mutate(location = if_else(parameter == "TVCL", log(0.5), log(6)),
+         scale = if_else(parameter == "TVCL", 1, 1),
+         dens = dlnorm(value, meanlog = location,
+                       sdlog = scale))
+
+p_cl_2 <- ggplot(data = dens_data_2 %>%
+                   filter(parameter == "TVCL"),
+                 aes(x = value, y = dens, group = parameter)) +
+  geom_line(size = 1.25) +
+  theme_bw(18) +
+  geom_area(mapping = aes(x = if_else(between(value, 0.09, 0.56), value, 0)),
+            fill = "red") +
+  scale_y_continuous(name = "Density",
+                     limits = c(0, 1.35),
+                     expand = c(0, 0)) +
+  scale_x_continuous(name = "Clearance (L/d)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 5, by = 1),
+                     labels = seq(0, 5, by = 1))
+
+
+p_vc_2 <- ggplot(data = dens_data_2 %>%
+                   filter(parameter == "TVVC"),
+                 aes(x = value, y = dens, group = parameter)) +
+  geom_line(size = 1.25) +
+  theme_bw(18) +
+  geom_area(mapping = aes(x = if_else(between(value, 3, 8), value, 0)),
+            fill = "red") +
+  scale_y_continuous(name = "Density",
+                     limits = c(0, 0.15),
+                     expand = c(0, 0)) +
+  scale_x_continuous(name = "Volume (L)",
+                     expand = c(0, 0))
+p_cl_2 | p_vc_2
+
+```
+
+Either way, my goal here was to set a weakly informative prior by looking at historical estimates for drugs in the same class, then making sure there is plenty of prior mass over the range of previous estimates while also ruling out values that really wouldn't make any sense. Then ideally the data will take it from there.
+
+#### Priors for Nested Models and Occam's Razor
+
+Often times in pharmacometrics we extend our models because we believe they are failing to capture some aspect of the data. For example, extending a one compartment model to a two compartment model to account for two-phase elimination. Other examples in pharmacometrics abound such as delay compartments, nonlinear clearance, and exponential versus logistic tumor growth. These models are all nested in the sense that the less complex model is a special case of the more complex model with parameter values fixed to some constant. For example, a one compartment model can be thought of as a two compartment model where the $Q$ parameter is fixed to zero, or in other words, a two compartment model with an infinitely informative prior with all of its mass on zero. At the other extreme is the extended model with completely uninformative priors on the additional parameters, which in practice can cause computational issues when data alone does not identify the additional parameters very well.
+
+For nested models we can place priors on the extended parameters that give us the best of the both worlds. In a two compartment model for example, a Half-Cauchy prior on $Q$ is a relaxation of the one compartment model that slightly favors the simpler explanation of $Q=0$, but also allows for non-zero $Q$ if the data provides enough evidence to support it. This idea of incorporating the principle of Occam's razor in our inference via priors, relieves computational issues and is the principle behind modern complex non-parameteric models and tools like LASSO that can fit many parameters by regularizing to favor the simpler nested model.
+
+#### Prior Predictive Checks
+
+A wealth of prior information about the properties of our drugs exists in the form of published historical data, pre-clinical experiments, and basic physical constraints. However, for complex models we occasionally have parameters whose interpretation and relationship to data which we observe is unclear or highly complex. In these cases, prior predictive checks are a powerful tool for helping us elucidate these relationships and choose our priors. The principle is that while we may not always know reasonable values for a parameter in a complex model, we generally have a good understanding of reasonable values of our data. We briefly illustrate this using a two compartment model.
+
+A prior predictive check simply consists of taking draws from your prior and simulating data using those draws. To do this, all we have to do is fit our model without any data. This can be done easily in Stan/Torsten by fitting a model as we normally would except we place the likelihood in an if-statement that controls whether we wants to draw from the prior only or the full posterior which includes both the prior and the likelihood. This is done in the two compartment model below where we use log-normal priors on the parameters.
+
+```{r model-ppc, max.height='450px', comment=NA}
+model_ppc <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_lognormal_priors_ppc.stan")
+
+model_ppc$print()
+```
+
+We prepare the data as we normally would for Stan/Torsten except we include a new toggle `prior_only` and set it to 1. This data preparation step is mostly just book keeping to tell Stan and Torsten how many patients we're fitting, how many observations, and the indices of each patient in the data frame we're passing in.
+
+We also specify the priors in this data preparation step. We start with the log-normal priors specified above along with vague log-normal priors on the second compartment volume and transfer rate.
+
+The goal is to see whether for the prior values considered, the data generated from those priors, in this case PK concentration over time, results in sensible values and values that are able to capture your data. As an aside, priors can be thought to set the prior values considered in our search space where we will try to find all the combinations of parameters that reasonably fit our data. From this perspective it is easy to see why vague or no priors can lead to computational issues when data is not adequate, because you can be consdering an unbounded search space!
+
+In general, you can start with vague priors and gradually tighten them so that your prior does not consider nonsensical values, e.g. values of concentration that are unreasonably high or low. Alternatively, you can start with highly informative priors centered around a value of the parameters where you know the solution makes sense, and you can gradually loosen them until the corresponding data generated from those priors considers all reasonable values of data you expect to see. We illustrate by starting somewhere in the middle, but the latter technique is sometimes preferred in practice as it is more computationally stable.
+
+```{r prepare-data-ppc, eval=TRUE, echo=TRUE, class.output="scroll-300", cache=TRUE}
+nonmem_data <- read_csv("Data/iv_2cmt_no_bloq.csv",
+                        na = ".") %>%
+  rename_all(tolower) %>%
+  rename(ID = "id",
+         DV = "dv") %>%
+  mutate(DV = if_else(is.na(DV), 5555555, DV)) # This value can be anything except NA. It'll be indexed away
+
+n_subjects <- nonmem_data %>%  # number of individuals
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_total <- nrow(nonmem_data)   # total number of records
+
+i_obs <- nonmem_data %>%       # index for observation records
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)         # number of observation records
+
+subj_start <- nonmem_data %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_total = n_total,
+                  n_obs = n_obs,
+                  i_obs = i_obs,
+                  ID = nonmem_data$ID,
+                  amt = nonmem_data$amt,
+                  cmt = nonmem_data$cmt,
+                  evid = nonmem_data$evid,
+                  rate = nonmem_data$rate,
+                  ii = nonmem_data$ii,
+                  addl = nonmem_data$addl,
+                  ss = nonmem_data$ss,
+                  time = nonmem_data$time,
+                  dv = nonmem_data$DV,
+                  subj_start = subj_start,
+                  subj_end = subj_end,
+                  location_tvcl = 0.5, scale_tvcl = 1,
+                  location_tvvc = 6, scale_tvvc = 1,
+                  location_tvq = 1, scale_tvq = 2,
+                  location_tvvp = 3, scale_tvvp = 2,
+                  scale_omega_cl = 0.4,
+                  scale_omega_vc = 0.4,
+                  scale_omega_q = 0.4,
+                  scale_omega_vp = 0.4,
+                  lkj_df_omega = 2,
+                  scale_sigma_p = 0.5,
+                  scale_sigma_a = 1,
+                  lkj_df_sigma = 2,
+                  prior_only = 1L)
+```
+
+After setting up the input data and our priors, we now fit the model as we normally would:
+
+```{r model-ppc-fit, eval=TRUE, cache=TRUE, echo=TRUE}
+fit_ppc1 <- model_ppc$sample(data = stan_data,
+                      seed = 112358,
+                      chains = 4,
+                      parallel_chains = 4,
+                      iter_warmup = 500,
+                      iter_sampling = 1000,
+                      adapt_delta = 0.8,
+                      refresh = 500,
+                      max_treedepth = 10,
+                      init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                             TVVC = rlnorm(1, log(6), 0.3),
+                                             TVQ = rlnorm(1, log(1), 0.3),
+                                             TVVP = rlnorm(1, log(3), 0.3),
+                                             omega = rlnorm(5, log(0.3), 0.3),
+                                             sigma = rlnorm(2, log(0.5), 0.3)))
+```
+
+We now plot the concentration data generated from our use of priors. Specifically, we look at concentration values at the first few study time points using the dosing regimen that was given to the first three patients in our study. The concentration values are generated in Stan's generated quantities block by solving the two compartment model at the various values drawn from our prior. No additional observational noise is added (although we could if we wanted to also tune the prior on $\sigma$). We summarize the drawn concentration samples with medians along with 5% and 95% quantiles. Lastly, we overlay the actual data of our three patients who actually were assigned this dosing regimen over these prior predictive samples to give us additional perspective on whether the simulated concentration values generated from our prior are reasonable.
+
+```{r plot-ppc1, cache=TRUE, class.output="scroll-300", max.height='450px'}
+ipred_ppc <- fit_ppc1$summary("ipred") %>%
+  bind_cols(filter(nonmem_data, evid == 0)) %>%
+  filter(ID == 1, time <= 28)
+
+nonmem_data_patient123 <-nonmem_data %>%
+  filter(evid == 0) %>%
+  mutate(i = row_number()) %>%
+  filter(ID %in% c(1, 2, 3), time <= 28)
+
+ipred_ppc %>%
+  ggplot(aes(time, median)) +
+  geom_pointrange(aes(ymin = q5, ymax = q95)) +
+  geom_point(aes(time, DV), color = "red", data = nonmem_data_patient123) +
+  scale_y_log10() +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (d)") +
+  scale_y_log10(name = "Drug Concentration (ug/mL)")
+```
+
+From the plot it seems like we are considering a reasonable range of solutions for early values of concentration with our prior. However, for the later value, just before the second dose, we are clearly considering values that are unreasonably low. We know that for a mAB with a long half-life we should not have such low concentration after 28 days. Furthermore none of our observed data comes close to being that low. To explore further which parameter values that we are considering with our prior correspond to these unreasonable values, we can plot a scatter plot of our prior samples versus the simulated value at this time point (called `ipred[6]` in our model).
+
+```{r ppc-mcmc-scatter1, cache=TRUE, class.output="scroll-300", max.height='450px', fig.align="center"}
+mcmc_pairs(fit_ppc1$draws(c("TVCL", "TVVC", "TVQ", "TVVP", "ipred[6]")),
+           diag_fun = "dens",
+           transformations = "log")
+```
+
+We can see that the particularly low values of `ipred[6]` correspond closely to high `TVCL`, low `TVVC`, and somewhat to low `TVVP`. We can thus limit our priors in these areas to give less weight to these values. Note that the most extreme points of `ipred[6]` occur when both `TVCL` is large and `TVVC` is small. This could suggest that we want a prior on these parameters with a negative correlation, although we'll keep the priors uncorrelated for now. For the sake of the example, we're assuming we don't have much intuition about the parameters but we know that the posterior of volume and clearance are often negatively correlated.
+
+```{r prepare-data-ppc2, eval=TRUE, echo=TRUE, class.output="scroll-300", cache=TRUE}
+stan_data2 <- stan_data
+stan_data2$location_tvcl <- 0.2
+stan_data2$scale_tvcl <- 0.5
+stan_data2$location_tvvc <- 5
+stan_data2$scale_tvvc <- 0.5
+stan_data2$scale_tvvp <- 1
+```
+
+```{r model-ppc-fit2, eval=TRUE, cache=TRUE, echo=TRUE}
+fit_ppc2 <- model_ppc$sample(data = stan_data2,
+                             seed = 112358,
+                             chains = 4,
+                             parallel_chains = 4,
+                             iter_warmup = 500,
+                             iter_sampling = 1000,
+                             adapt_delta = 0.8,
+                             refresh = 500,
+                             max_treedepth = 10,
+                             init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                                    TVVC = rlnorm(1, log(6), 0.3),
+                                                    TVQ = rlnorm(1, log(1), 0.3),
+                                                    TVVP = rlnorm(1, log(3), 0.3),
+                                                    omega = rlnorm(5, log(0.3), 0.3),
+                                                    sigma = rlnorm(2, log(0.5), 0.3)))
+```
+
+```{r plot-ppc2, cache=TRUE, class.output="scroll-300", max.height='450px'}
+ipred_ppc <- fit_ppc2$summary("ipred") %>%
+  bind_cols(filter(nonmem_data, evid == 0)) %>%
+  filter(ID == 1, time <= 28)
+
+ipred_ppc %>%
+  ggplot(aes(time, median)) +
+  geom_pointrange(aes(ymin = q5, ymax = q95)) +
+  geom_point(aes(time, DV), color = "red", data = nonmem_data_patient123) +
+  scale_y_log10() +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (d)") +
+  scale_y_log10(name = "Drug Concentration (ug/mL)")
+```
+
+Now with our remodel refit to give us our new prior predictive check with the adjusted priors we can see that for `ipred[6]` we are no longer considering unreasonably low values. Meanwhile at the other time point we consider a reasonable range of parameter values that lead to concentrations which encompass our observed data. Further tuning could be done to broaden or tighten the search space as desired.
+
+As a final and related note to this section, we briefly mention the concept of placing priors directly on derived quantities. In our prior predictive check example we knew reasonable ranges for our concentration (data) values, but we didn't know reasonable values for our parameters or how they relate to the resulting concentrations. We thus hand-tuned our priors so that the resulting prior parameter values considered corresponded to reasonable output concentration solutions. In Stan there is indeed an even more direct way to do this. We can place priors on parameter-derived quantities directly! For example, we can place a lognormal prior on `ipred[6]` directly in our Stan model block so that unreasonably low values are avoided. Since `ipred[6]` is of course a function of the parameters, this induces a prior on the parameters.
+
+Stan allows a lot of creativity on priors on derived quantities, as long as it's expressible in an equation. For example we can specify a lognormal in the resulting amount (instead of concentration) of drug at a particular time point and specify that we think it should be no less than 1 10,000th of the dose after an hour. We can also place priors on things like half life for which we know the expression of as a function of parameters (incidentally this will induce a prior on volume and clearance that has a negative correlation).
+
+#### Flat and Other "non-informative" Priors
+
+People often try to be as "objective" as possible, so they use either a flat prior or an extremely wide prior. For example, in the NONMEM Users Guide, they use a multivariate normal prior distribution on the (log-)population parameters:
+
+```{=tex}
+\begin{align}
+\begin{pmatrix}
+log(TVCL) \\ log(TVVC) \\ log(TVQ) \\ log(TVVP) \\ log(TVKA) \\
+\end{pmatrix} \sim Normal\left(
+\begin{pmatrix}
+2 \\ 2 \\ 2 \\ 2 \\ 2 \\
+\end{pmatrix}
+, \;
+\begin{pmatrix}
+10,000 & 0 & 0 & 0 & 0 \\
+0 & 10,000 & 0 & 0 & 0 \\
+0 & 0 & 10,000 & 0 & 0 \\
+0 & 0 & 0 & 10,000 & 0 \\
+0 & 0 & 0 & 0 & 10,000 \\
+\end{pmatrix}
+\right) \notag \\
+\end{align}
+```
+and say "because variances are very large, this means that the prior information on THETAS is highly uninformative." However, if we look at this distribution after transforming to the natural space (i.e. $TVVC = exp(log(TVVC))$), then we see that this distribution is not at all uninformative:
+
+```{r non-informative, cache=TRUE, fig.height=4, fig.width=8, echo=TRUE, fig.show = 'asis', fig.retina = 3}
+
+data_uninformative <- tibble(TVVC = c(seq(0, 15, by = 0.0001), seq(16, 100,
+                                                                   by = 1),
+                     seq(101, 10001, by = 10))) %>%
+  mutate(dens = dlnorm(TVVC, log(2),  sqrt(10000)))
+
+p_non_informative <- ggplot(data_uninformative, aes(x = TVVC, y = dens)) +
+  geom_line() +
+  scale_x_continuous(limits = c(0, 100),
+                     trans = "identity") +
+  scale_y_continuous(name = "Density",
+                     trans = "identity") +
+  geom_hline(yintercept = 0) +
+  theme_bw(18) +
+  ggtitle('"Uninformative" Prior') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plotly::ggplotly(p_non_informative)
+
+```
+
+In fact, this "uninformative" distribution pushes almost half of the prior mass to 0 and then has almost half of the prior mass at values that are nonsensically large:
+
+```{r non-informative-table, cache=TRUE}
+
+tibble(dist = c("Half-Cauchy(0, 10)", "Lognormal(log(6), 1)",
+                "Lognormal(2, 10000)", "Lognormal(2, 100)"),
+       p_between_3_and_8 = c((pcauchy(8, 0, 10) - pcauchy(3, 0, 10))/
+                               pcauchy(0, 0, 10),
+                             plnorm(8, log(6), 1) - plnorm(3, log(6), 1),
+                             plnorm(8, 2, sqrt(10000)) -
+                               plnorm(3, 2, sqrt(10000)),
+                             plnorm(8, 2, sqrt(100)) -
+                               plnorm(3, 2, sqrt(100))),
+       p_lt_0.05 = c((pcauchy(0.5, 0, 10) - pcauchy(0, 0, 10))/pcauchy(0, 0, 10),
+                    plnorm(0.5, log(6), 1),
+                    plnorm(0.5, 2, sqrt(10000)),
+                    plnorm(0.5, 2, sqrt(100))),
+       p_gt_100 = c(pcauchy(100, 0, 10, lower.tail = FALSE)/pcauchy(0, 0, 10),
+                    plnorm(100, log(6), 1, lower.tail = FALSE),
+                    plnorm(100, 2, sqrt(10000), lower.tail = FALSE),
+                    plnorm(100, 2, sqrt(100), lower.tail = FALSE))) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  knitr::kable(col.names = c("Distribution",
+                             "P(3 < TVVC < 8)",
+                             "P(TVVC < 0.5)",
+                             "P(TVVC > 100)")) %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+```
+
+The main idea here is that what is "noninformative" on one scale might not be noninformative after a transformation. Don't just give a parameter a wide prior variance without thinking about the meaning of the prior values. Also, we almost always know *something* about the parameter, even if it's just the scale of potential values it might take, *e.g.* absorption rate constants tend to be less than 5 - higher than that we basically have a step function (or we maybe could change the units of time).
+
+### Fitting the Model in Stan with Torsten
+
+The main things we want to do after collecting our data and eliciting good prior information are fitting a model to our data to obtain a posterior distribution and prediction/simulation from the posterior. We can do the fitting and prediction/simulation either separately or simultaneously. It doesn't make much difference if the fitting and prediction for *observed individuals* is done separately or simultaneously, but my recommendation is to do those first and simulate *unobserved individuals* separately, since we might not know what we want to predict/simulate at the time that we do the fitting.
+
+To do this fitting and predicting/simulating, I have it set up to have a few `.stan` files:
+
+1.  A file that fits the model. This will fit the data and save the posterior distributions in a [CmdStanMCMC](https://mc-stan.org/cmdstanr/reference/CmdStanMCMC.html) object for the
+    -   population parameters ($TVCL,\;TVVC,\;TVQ,\;TVVP$),
+    -   individual parameters ($CL, \;VC, \;Q, \;VP$),
+    -   individual $\eta$ values,
+    -   variability $\left(\omega_{CL}, \;\omega_{V_c}, \;\omega_{Q}, \;\omega_{V_p}\right)$, covariance and correlation parameters $\left(\omega_{P_1, P_2}, \;\rho_{P_1, P_2}\right)$, and uncertainty parameters $\left(\sigma_p, \; \sigma_a\right)$.
+    -   *PRED, IPRED, RES, WRES, IRES, IWRES*
+    -   replications of the observed data for posterior predictive checking (PPC, similar to a VPC),
+    -   *log_lik* variable that is used for model comparison ([Leave-One-Out Cross Validation](https://link.springer.com/article/10.1007/s11222-016-9696-4)).
+2.  A file that makes predictions at unobserved locations for the *observed* individuals and saves them in a [CmdStanGQ](https://mc-stan.org/cmdstanr/reference/CmdStanGQ.html) object. This is mainly just to predict at a denser grid to make nice smooth pictures of posterior predictions for the observed individuals and to make the PPC look nicer.
+3.  A file that makes predictions for a new, unobserved individual or individuals and saves them in a *CmdStanGQ* object. This is useful for simulating a population or for doing clinical trial simulations taking into account all sources of variability and uncertainty.
+4.  A file that does 1. and 2. simultaneously.
+
+You can choose whether you want to do 1. and 2. sequentially or simultaneously.
+
+#### A Standard Way to Write the Model {#sec-population-fit-no-threading}
+
+The first model I will show is relatively clean and easy-to-read.
+
+```{r model-no-threading, max.height='450px', comment=NA}
+model1 <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_no_threading.stan")
+
+model1$print()
+```
+
+Before fitting the data to the model, there is a small amount of pre-processing to prepare the data to be inserted into Stan but they are basic data-manipulations, and with Torsten, we can simply input the columns of the NONMEM data set:
+
+```{r prepare-data-1, eval=TRUE, echo=TRUE, class.output="scroll-300", cache=TRUE}
+nonmem_data <- read_csv("Data/iv_2cmt_no_bloq.csv",
+                        na = ".") %>%
+  rename_all(tolower) %>%
+  rename(ID = "id",
+         DV = "dv") %>%
+  mutate(DV = if_else(is.na(DV), 5555555, DV)) # This value can be anything except NA. It'll be indexed away
+
+n_subjects <- nonmem_data %>%  # number of individuals
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_total <- nrow(nonmem_data)   # total number of records
+
+i_obs <- nonmem_data %>%       # index for observation records
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)         # number of observation records
+
+subj_start <- nonmem_data %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_total = n_total,
+                  n_obs = n_obs,
+                  i_obs = i_obs,
+                  ID = nonmem_data$ID,
+                  amt = nonmem_data$amt,
+                  cmt = nonmem_data$cmt,
+                  evid = nonmem_data$evid,
+                  rate = nonmem_data$rate,
+                  ii = nonmem_data$ii,
+                  addl = nonmem_data$addl,
+                  ss = nonmem_data$ss,
+                  time = nonmem_data$time,
+                  dv = nonmem_data$DV,
+                  subj_start = subj_start,
+                  subj_end = subj_end,
+                  scale_tvcl = 2,
+                  scale_tvvc = 10,
+                  scale_tvq = 2,
+                  scale_tvvp = 10,
+                  scale_omega_cl = 0.4,
+                  scale_omega_vc = 0.4,
+                  scale_omega_q = 0.4,
+                  scale_omega_vp = 0.4,
+                  lkj_df_omega = 2,
+                  scale_sigma_p = 0.5,
+                  scale_sigma_a = 1,
+                  lkj_df_sigma = 2)
+
+```
+
+We can then fit the data to this model:
+
+```{r model-1-fit, eval=TRUE, cache=TRUE, echo=TRUE}
+fit1 <- model1$sample(data = stan_data,
+                      seed = 112358,
+                      chains = 4,
+                      parallel_chains = 4,
+                      iter_warmup = 500,
+                      iter_sampling = 1000,
+                      adapt_delta = 0.8,
+                      refresh = 500,
+                      max_treedepth = 10,
+                      init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                             TVVC = rlnorm(1, log(6), 0.3),
+                                             TVQ = rlnorm(1, log(1), 0.3),
+                                             TVVP = rlnorm(1, log(3), 0.3),
+                                             omega = rlnorm(5, log(0.3), 0.3),
+                                             sigma = rlnorm(2, log(0.5), 0.3)))
+```
+
+#### Markov Chain Monte Carlo Aside
+
+Historically we perform MCMC in a completely sequential manner:
+
+```{r collapsible-tree-typical, cache=TRUE, echo=FALSE}
+typical_mcmc <- tibble(Main = "MCMC",
+                       a1 = "Chain 1, Iteration 1",
+                       a2 = "Chain 1, Iteration 2",
+                       a3 = "...",
+                       a4 = "Chain 1, Iteration n",
+                       b1 = "Chain 2, Iteration 1",
+                       b2 = "Chain 2, Iteration 2",
+                       b3 = "...",
+                       b4 = "Chain 2, Iteration n",
+                       ellipsis = "...",
+                       m1 = "Chain m, Iteration 1",
+                       m2 = "Chain m, Iteration 2",
+                       m3 = "...",
+                       m4 = "Chain m, Iteration n")
+collapsibleTree(typical_mcmc,
+                root = "Typical MCMC",
+                hierarchy = colnames(typical_mcmc)[-1],
+                collapsed = TRUE,
+                linkLength = 120)
+```
+
+This is what we did in the single-individual example in @sec-single-individual-fit-stan-and-torsten. However, Stan (along with many other softwares) can automatically sample the chains in parallel (as we did with the example just above in Section @sec-population-fit-no-threading):
+
+```{r collapsible-tree-parallel, cache=TRUE, echo=FALSE}
+parallel_mcmc <- tibble(Main = rep("MCMC", 4),
+                        Chain = str_c("Chain ", 1:4),
+                        a1 = rep("Iteration 1", 4),
+                        a2 = rep("Iteration 2", 4),
+                        a3 = rep("...", 4),
+                        a4 = rep("Iteration n", 4))
+collapsibleTree(parallel_mcmc,
+                root = "Parallel MCMC",
+                hierarchy = colnames(parallel_mcmc)[-1],
+                collapsed = TRUE)
+```
+
+Within each iteration, we calculate the posterior density (up to a constant): $$ \pi(\mathbf{\theta \, | \, \mathbf{y}}) \propto \mathcal{L}(\mathbf{\theta \, | \, \mathbf{y}})\,p(\mathbf{\theta})$$ where $\mathcal{L(\cdot\,|\,\cdot)}$ is the likelihood and $p(\cdot)$ is the prior. For us, we generally have $n_{subj}$ independent subjects, and so we can calculate the likelihood for each individual separately from the others[^poppk-11]. Typically, the likelihood for each subject is calculated sequentially, but Stan has [multiple methods](https://mc-stan.org/docs/stan-users-guide/parallelization.html) for parallelization. The `reduce_sum` function implemented in most of the models later in this presentation[^poppk-12] uses [multi-threading](https://en.wikipedia.org/wiki/Multithreading_(computer_architecture)) that allows the individual likelihoods to be calculated in parallel rather than sequentially:
+
+[^poppk-11]: In Stan we actually calculate the *log-*posterior density (up to a constant). Taking some liberties with notation, this means the likelihood can be written as \begin{align}
+    \mathcal{L}(\mathbf{\theta \, | \, \mathbf{y}}) &= \prod_{i=1}^{n_{subj}}
+    \mathcal{L}(\mathbf{\theta_i \, | \, \mathbf{y}}) \notag \\
+    \implies log\left(\mathcal{L}(\mathbf{\theta \, | \, \mathbf{y}})\right) &=
+    \ell(\mathbf{\theta \, | \, \mathbf{y}}) \notag \\
+    &= \sum_{i=1}^{n_{subj}}\ell(\mathbf{\theta_i \, | \, \mathbf{y}})
+    \end{align} Hence reduce-*sum* instead of reduce-*prod*.
+
+[^poppk-12]: Torsten also implements group integrators that support parallelization through Message Passing Interface (MPI). We won't go into that here due to the difficulty of setting up the MPI, but there will be information in the Github repo that might be able to help you set it up and write your models with the group solvers.
+
+```{r collapsible-tree-within-iteration, cache=TRUE, echo=FALSE}
+within_iteration <- tibble(Main = rep("Iteration i", 6),
+                           l2 = c(rep("Standard MCMC", 2),
+                                  rep("Within-Chain Parallelization", 4)),
+                           l3 = rep("Posterior Density", 6),
+                           l4 = c("Likelihood", "Priors",
+                                  rep("Likelihood", 3), "Priors"),
+                           l5 = c("Subject 1", NA_character_,
+                                  str_c("Subject ", 1:2), "Subject 3...",
+                                  NA_character_),
+                           l6 = c("Subject 2", rep(NA_character_, 5)),
+                           l7 = c("Subject 3", rep(NA_character_, 5)),
+                           ellipsis = c("...", rep(NA_character_, 5)))
+collapsibleTree(within_iteration,
+                root = "Iteration i",
+                hierarchy = colnames(within_iteration)[-1],
+                collapsed = TRUE,
+                linkLength = 100)
+```
+
+This within-chain parallelization can lead to substantial speed-ups in computation time[^poppk-13].
+
+[^poppk-13]: Be aware that there is overhead to this parallelization. If you use $M$ threads-per-chain, the speedup will be $< Mx$ and could potentially actually be slower, depending on your machine's architecture and the computational complexity of the likelihood. In general, the more computationally intensive the likelihood calculation is, *e.g.* solving ODEs, the more speedup the within-chain parallelization will provide
+
+#### A Model with Within-Chain Parallelization with `reduce_sum` {.tabset}
+
+This next model is a bit harder to read, but it is threaded so that it can make use of the available computing power to implement within-chain parallelization. In practice, this means calculating the (log-)likelihood for each individual in parallel and then bringing them back together.
+
+::: panel-tabset
+##### Half-Cauchy Priors
+
+```{r model-threading, max.height='450px', comment=NA}
+model2 <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa.stan",
+                        cpp_options = list(stan_threads = TRUE))
+
+model2$print()
+```
+
+We can then fit the data to this model. A guide for choosing the `chains, parallel_chains,` and `threads_per_chain` arguments is to
+
+1.  Figure out how many cores you have available (`parallel::detectCores()`)
+2.  Choose the number of `chains` you want to sample (we recommend 4)
+3.  If `chains < parallel::detectCores()`, then have `parallel_chains = chains` (almost all modern machines have at least 4 cores)
+4.  `threads_per_chain` should be anywhere between 1 and $\frac{parallel::detectCores()}{parallel\_chains}$
+
+For example, if your machine has 32 cores, we recommend having 4 `chains`, 4 `parallel_chains`, and 8 `threads_per_chain`. This will make use of all the available cores. Using more `threads_per_chain` won't be helpful in reducing execution time, since the available cores are already in use.
+
+```{r model-2-fit, eval=TRUE, cache=TRUE, echo=TRUE}
+fit <- model2$sample(data = stan_data,
+                     seed = 112358,
+                     chains = 4,
+                     parallel_chains = 4,
+                     threads_per_chain = 4,
+                     iter_warmup = 500,
+                     iter_sampling = 1000,
+                     adapt_delta = 0.8,
+                     refresh = 500,
+                     max_treedepth = 10,
+                     init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                            TVVC = rlnorm(1, log(6), 0.3),
+                                            TVQ = rlnorm(1, log(1), 0.3),
+                                            TVVP = rlnorm(1, log(3), 0.3),
+                                            omega = rlnorm(5, log(0.3), 0.3),
+                                            sigma = rlnorm(2, log(0.5), 0.3)))
+```
+
+##### Lognormal Priors
+
+```{r model-threading-lognormal, max.height='450px', comment=NA}
+model3 <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_lognormal_priors.stan",
+                        cpp_options = list(stan_threads = TRUE))
+
+model3$print()
+```
+
+We can then fit the data to this model. A guide for choosing the `chains, parallel_chains,` and `threads_per_chain` arguments is to
+
+1.  Figure out how many cores you have available (`parallel::detectCores()`)
+2.  Choose the number of `chains` you want to sample (we recommend 4)
+3.  If `chains < parallel::detectCores()`, then have `parallel_chains = chains` (almost all modern machines have at least 4 cores)
+4.  `threads_per_chain` should be anywhere between 1 and $\frac{parallel::detectCores()}{parallel\_chains}$
+
+For example, if your machine has 32 cores, we recommend having 4 `chains`, 4 `parallel_chains`, and 8 `threads_per_chain`. This will make use of all the available cores. Using more `threads_per_chain` won't be helpful in reducing execution time, since the available cores are already in use.
+
+```{r model-3-fit, eval=TRUE, cache=TRUE, echo=TRUE}
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_total = n_total,
+                  n_obs = n_obs,
+                  i_obs = i_obs,
+                  ID = nonmem_data$ID,
+                  amt = nonmem_data$amt,
+                  cmt = nonmem_data$cmt,
+                  evid = nonmem_data$evid,
+                  rate = nonmem_data$rate,
+                  ii = nonmem_data$ii,
+                  addl = nonmem_data$addl,
+                  ss = nonmem_data$ss,
+                  time = nonmem_data$time,
+                  dv = nonmem_data$DV,
+                  subj_start = subj_start,
+                  subj_end = subj_end,
+                  location_tvcl = 0.5,
+                  location_tvvc = 6,
+                  location_tvq = 2,
+                  location_tvvp = 6,
+                  scale_tvcl = 1,
+                  scale_tvvc = 1,
+                  scale_tvq = 1,
+                  scale_tvvp = 1,
+                  scale_omega_cl = 0.4,
+                  scale_omega_vc = 0.4,
+                  scale_omega_q = 0.4,
+                  scale_omega_vp = 0.4,
+                  lkj_df_omega = 2,
+                  scale_sigma_p = 0.5,
+                  scale_sigma_a = 1,
+                  lkj_df_sigma = 2)
+
+fit3 <- model3$sample(data = stan_data,
+                      seed = 112358,
+                      chains = 4,
+                      parallel_chains = 4,
+                      threads_per_chain = 4,
+                      iter_warmup = 500,
+                      iter_sampling = 1000,
+                      adapt_delta = 0.8,
+                      refresh = 500,
+                      max_treedepth = 10,
+                      init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                             TVVC = rlnorm(1, log(6), 0.3),
+                                             TVQ = rlnorm(1, log(1), 0.3),
+                                             TVVP = rlnorm(1, log(3), 0.3),
+                                             omega = rlnorm(5, log(0.3), 0.3),
+                                             sigma = rlnorm(2, log(0.5), 0.3)))
+```
+:::
+
+## Two-Compartment Model with IV Infusion and BLOQ values
+
+Oftentimes, we have observations that are below the limit of quantification (BLOQ), meaning that the assay has only been validated down to a certain value, (the lower limit of quantification, LLOQ). A [paper by Stuart Beal](https://link.springer.com/content/pdf/10.1023/A:1012299115260.pdf) goes through 7 methods of handling this BLOQ data in NONMEM. While in my experience M1 (dropping any BLOQ values completely) and M5 (replace BLOQ values with $LLOQ/2$) are the most common in the pharmacometrics world, M3 (treat the BLOQ values as left-censored data) and M4 (treat the BLOQ values as left-censored data and truncated below at 0) are more technically correct and tend to produce better results.
+
+### Data
+
+We will just adapt the previous data to create some BLOQ values and then fit it. To create these BLOQ, let's assume an LLOQ of $0.5 \frac{\mu g}{mL}$ for the first four cohorts and an LLOQ of $5 \frac{\mu g}{mL}$ for the last 4 cohorts[^poppk-14].
+
+[^poppk-14]: We did this so that if for some reason the assay changed, the LLOQ might change. There's no real reason for this to be the case, but I wanted to show that the LLOQ doesn't have to just be one number - each observation just needs to be associated with an LLOQ.
+
+```{r create-bloq-data, eval=TRUE, echo=TRUE, class.output="scroll-300", cache=TRUE}
+nonmem_data_bloq <- nonmem_data_observed %>%
+  mutate(LLOQ = if_else(ID %in% 1:12, 0.5, 5),
+         BLOQ = factor(if_else(DV < LLOQ, 1, 0)),
+         DV = if_else(BLOQ %in% c(1, NA), NA_real_, DV),
+         MDV = as.numeric(is.na(DV) | BLOQ == 1))
+
+
+nonmem_data_bloq %>%
+  mutate(across(where(is.double), round, 3)) %>%
+  rename_all(toupper) %>%
+  DT::datatable(rownames = FALSE, filter = "top",
+                options = list(scrollX = TRUE,
+                               columnDefs = list(list(className = 'dt-center',
+                                                      targets = "_all"))))
+```
+
+We can visualize the observed data in this NONMEM data set that we will be modeling (with dosing events indicated with vertical magenta lines and BLOQ values indicated by lime green dots at the LLOQ (dashed line):
+
+::: vscroll-plot1
+```{r plot-iv-2cmt-jitter-bloq, cache=TRUE, fig.height=25, fig.width=15, class.output="remark-slide-scaler"}
+
+(p1 <- ggplot(nonmem_data_bloq %>%
+                mutate(ID = factor(ID)) %>%
+                group_by(ID) %>%
+                mutate(Dose = factor(max(AMT, na.rm = TRUE))) %>%
+                ungroup() %>%
+                filter(MDV == 0)) +
+  geom_line(mapping = aes(x = TIME, y = DV, group = ID, color = Dose)) +
+  geom_point(mapping = aes(x = TIME, y = DV, group = ID, color = Dose)) +
+  scale_color_discrete(name = "Dose (mg)") +
+  scale_y_log10(name = latex2exp::TeX("$Drug Conc. \\; (\\mu g/mL)$"),
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw(18) +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.line = element_line(size = 2),
+        legend.position = "bottom") +
+  geom_hline(aes(yintercept = LLOQ, group = ID), size = 1.2, linetype = 2) +
+  geom_vline(data = nonmem_data_bloq %>%
+               mutate(ID = factor(ID)) %>%
+               filter(EVID == 1),
+             mapping = aes(xintercept = TIME, group = ID),
+             linetype = 2, color = "magenta", alpha = 0.5) +
+  geom_point(data = nonmem_data_bloq %>%
+                 mutate(ID = factor(ID),
+                        DV = LLOQ) %>%
+                 filter(BLOQ == 1, TIME > 0),
+               aes(x = TIME, y = DV, group = ID), inherit.aes = TRUE,
+               shape = 18, color = "limegreen", size = 3) +
+  facet_wrap(~ID, labeller = label_both, ncol = 3, scales = "free_y"))
+
+```
+:::
+
+And we can look at a quick summary of the number of BLOQ values:
+
+```{r num-bloq-2cmt-iv, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+nonmem_data_bloq %>%
+  filter(EVID == 0) %>%
+  group_by(ID) %>%
+  summarize(lloq = unique(LLOQ),
+            n_obs = n(),
+            n_bloq = sum(BLOQ == 1)) %>%
+  filter(n_bloq > 0) %>%
+  knitr::kable(col.names = c("ID", "LLOQ", "Num. Observations",
+                             "Num. BLOQ")) %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+### Treat the BLOQ values as Left-Censored Data (M3) {#m3-model}
+
+Instead of tossing out the BLOQ data (M1) or assigning them some arbitrary value (M5-M7), we should keep them in the data set and treat them as left-censored data. This means that the likelihood contribution for observation $c_{ij}$ is calculated differently for observed values than for BLOQ values: \begin{align}
+\mbox{observed data} &- f\left(c_{ij} \, | \, \theta_i, \sigma, t_{ij} \right) \notag \\
+\mbox{BLOQ data} &- F\left(LLOQ \, | \, \theta_i, \sigma, t_{ij} \right) \notag \\
+\end{align}
+
+where $f\left(c_{ij} \, | \, \theta_i, \sigma, t_{ij} \right)$ is the density (pdf) and $F\left(LLOQ \, | \, \theta_i, \sigma, t_{ij} \right) = P\left(c_{ij} \leq LLOQ\, | \, \theta_i, \sigma, t_{ij} \right)$ is the cumulative distribution function (cdf).
+
+The relevant snippet of Stan code is as follows:
+
+```{verbatim}
+
+real partial_sum_lpmf(array[] int seq_subj, int start, int end,
+                        vector dv_obs, array[] int dv_obs_id, array[] int i_obs,
+                        array[] real amt, array[] int cmt, array[] int evid,
+                        array[] real time, array[] real rate, array[] real ii,
+                        array[] int addl, array[] int ss,
+                        array[] int subj_start, array[] int subj_end,
+                        real TVCL, real TVVC, real TVQ, real TVVP,
+                        vector omega, matrix L, matrix Z,
+                        vector sigma, matrix L_Sigma,
+                        vector lloq, array[] int bloq,
+                        int n_random, int n_subjects, int n_total){
+
+    real ptarget = 0;
+    vector[n_random] typical_values = to_vector({TVCL, TVVC, TVQ, TVVP});
+
+    matrix[n_subjects, n_random] eta = diag_pre_multiply(omega, L * Z);
+
+    matrix[n_subjects, n_random] theta =
+                          (rep_matrix(typical_values, n_subjects) .* exp(eta))';
+
+    matrix[2, 2] R_Sigma = multiply_lower_tri_self_transpose(L_Sigma);
+    matrix[2, 2] Sigma = quad_form_diag(R_Sigma, sigma);
+
+
+    int N = end - start + 1;    // number of subjects in this slice
+    vector[n_total] dv_ipred;   // = rep_vector(0, n_total);
+    matrix[n_total, 3] x_ipred; // = rep_matrix(0, n_total, 2);
+
+
+    int n_obs_slice = num_between(subj_start[start], subj_end[end], i_obs);
+    array[n_obs_slice] int i_obs_slice = find_between(subj_start[start],
+                                                      subj_end[end], i_obs);
+
+    vector[n_obs_slice] dv_obs_slice = find_between_vec(start, end,
+                                                        dv_obs_id, dv_obs);
+
+    vector[n_obs_slice] ipred_slice;
+
+    vector[n_obs_slice] lloq_slice = lloq[i_obs_slice];
+    array[n_obs_slice] int bloq_slice = bloq[i_obs_slice];
+
+
+    for(n in 1:N){            // loop over subjects in this slice
+
+      int nn = n + start - 1; // nn is the ID of the current subject
+
+      row_vector[n_random] theta_nn = theta[nn]; // access the parameters for subject nn
+      real cl = theta_nn[1];
+      real vc = theta_nn[2];
+      real q = theta_nn[3];
+      real vp = theta_nn[4];
+      array[5] real theta_params = {cl, q, vc, vp, 0}; // The 0 is for KA. Skip the absorption
+
+      x_ipred[subj_start[nn]:subj_end[nn], ] =
+        pmx_solve_twocpt(time[subj_start[nn]:subj_end[nn]],
+                         amt[subj_start[nn]:subj_end[nn]],
+                         rate[subj_start[nn]:subj_end[nn]],
+                         ii[subj_start[nn]:subj_end[nn]],
+                         evid[subj_start[nn]:subj_end[nn]],
+                         cmt[subj_start[nn]:subj_end[nn]],
+                         addl[subj_start[nn]:subj_end[nn]],
+                         ss[subj_start[nn]:subj_end[nn]],
+                         theta_params)';
+
+      dv_ipred[subj_start[nn]:subj_end[nn]] =
+        x_ipred[subj_start[nn]:subj_end[nn], 2] ./ vc;
+
+    }
+
+
+    ipred_slice = dv_ipred[i_obs_slice];
+
+    for(i in 1:n_obs_slice){
+      real sigma_tmp = sqrt(square(ipred_slice[i]) * Sigma[1, 1] +
+                                         Sigma[2, 2] +
+                                         2*ipred_slice[i]*Sigma[2, 1]);
+      if(bloq_slice[i] == 1){
+        ptarget += normal_lcdf(lloq_slice[i] | ipred_slice[i], sigma_tmp);
+      }else{
+        ptarget += normal_lpdf(dv_obs_slice[i] | ipred_slice[i], sigma_tmp);
+      }
+    }
+
+    return ptarget;
+
+  }
+
+```
+
+### Treat the BLOQ values as Left-Censored Data and Truncated Below at 0 (M4) {#sec-m4-model}
+
+We know that drug concentrations cannot be $< 0$, but the normal distribution has support ($-\infty, \, \infty$)[^poppk-15], so we will assume a normal distribution *truncated below at 0.* This will have the effect of limiting the support of our assumed distribution to $(0, \, \infty)$. Since we're assuming a truncated distribution, we need to adjust the likelihood contributions of our data[^poppk-16]: \begin{align}
+\mbox{observed data} &- \frac{f\left(c_{ij} \, | \, \theta_i, \sigma, t_{ij} \right)}{1 - F\left(0 \, | \, \theta_i, \sigma, t_{ij} \right)} \notag \\
+\mbox{BLOQ data} &- \frac{F\left(LLOQ \, | \, \theta_i, \sigma, t_{ij} \right) - F\left(0 \, | \, \theta_i, \sigma, t_{ij} \right)}{1 - F\left(0 \, | \, \theta_i, \sigma, t_{ij} \right)} \notag \\
+\end{align}
+
+[^poppk-15]: A model like our single-individual example that assumes *exponential* error has support over $(0, \, \infty)$, so truncation is not an issue. In that case, M3 and M4 are equivalent
+
+[^poppk-16]: For observed data with this truncated distribution, we need to "correct" the density so it integrates to 1. Division by $1 - F(\cdot \, | \, \cdot)$ has this effect. For the censored data, the numerator is similar to the M3 method, but we must also account for the fact that it must be $>0$, hence $P(0 \leq c_{ij} \leq LLOQ) = F(LLOQ) - F(0)$. The denominator is corrected in the same manner as for the observed data.
+
+We can see how this is implemented in the `.stan` file below:
+
+```{r m4-model, max.height='450px', comment=NA, class.output="scroll-300", cache=TRUE}
+model_m4 <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_m4.stan",
+                          cpp_options = list(stan_threads = TRUE))
+
+model_m4$print()
+```
+
+Preparing and fitting the data is very similar to our earlier example. The difference here is that we add the `lloq` and `bloq` columns from our NONMEM dataset to `stan_data`:
+
+```{r m4-fit, eval=TRUE, echo=TRUE, class.output="scroll-300", cache=TRUE, max.height='300px'}
+
+nonmem_data_bloq <- nonmem_data_bloq %>%
+  mutate(BLOQ = as.numeric(as.character(BLOQ)),
+         DV = if_else(BLOQ %in% c(1, NA), 5555555, DV), # This value can be anything > 0. It'll be indexed away
+         BLOQ = if_else(is.na(BLOQ), -999, BLOQ)) %>%
+  rename_all(tolower) %>%
+  rename(ID = "id",
+         DV = "dv")
+
+n_subjects <- nonmem_data_bloq %>%  # number of individuals
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_total <- nrow(nonmem_data_bloq)   # total number of records
+
+i_obs <- nonmem_data_bloq %>%
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)
+
+subj_start <- nonmem_data_bloq %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_total = n_total,
+                  n_obs = n_obs,
+                  i_obs = i_obs,
+                  ID = nonmem_data_bloq$ID,
+                  amt = nonmem_data_bloq$amt,
+                  cmt = nonmem_data_bloq$cmt,
+                  evid = nonmem_data_bloq$evid,
+                  rate = nonmem_data_bloq$rate,
+                  ii = nonmem_data_bloq$ii,
+                  addl = nonmem_data_bloq$addl,
+                  ss = nonmem_data_bloq$ss,
+                  time = nonmem_data_bloq$time,
+                  dv = nonmem_data_bloq$DV,
+                  subj_start = subj_start,
+                  subj_end = subj_end,
+                  lloq = nonmem_data_bloq$lloq,
+                  bloq = nonmem_data_bloq$bloq,
+                  scale_tvcl = 2,
+                  scale_tvvc = 10,
+                  scale_tvq = 2,
+                  scale_tvvp = 10,
+                  scale_omega_cl = 0.4,
+                  scale_omega_vc = 0.4,
+                  scale_omega_q = 0.4,
+                  scale_omega_vp = 0.4,
+                  lkj_df_omega = 2,
+                  scale_sigma_p = 0.5,
+                  scale_sigma_a = 1,
+                  lkj_df_sigma = 2)
+
+fit_m4 <- model_m4$sample(data = stan_data,
+                          chains = 4,
+                          parallel_chains = 4,
+                          threads_per_chain = 2,
+                          iter_warmup = 500,
+                          iter_sampling = 1000,
+                          adapt_delta = 0.8,
+                          refresh = 500,
+                          max_treedepth = 10,
+                          init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                                                 TVVC = rlnorm(1, log(5), 0.3),
+                                                 TVQ = rlnorm(1, log(1), 0.3),
+                                                 TVVP = rlnorm(1, log(10), 0.3),
+                                                 omega = rlnorm(4, log(0.3), 0.3),
+                                                 sigma = rlnorm(2, log(0.5), 0.3)))
+
+fit_m4$save_object("Torsten/Fits/iv_2cmt_ppa_m4.rds")
+```
+
+#### Post-Processing {#post-processing}
+
+After fitting we will want to check that the MCMC sampler worked properly and efficiently and that the chains mixed well, check model fits and assumptions, and obtain posterior estimates.
+
+We can first check whether the sampler worked as expected and that the chains mixed well:
+
+```{r post-processing-1, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, max.height='300px', cache=TRUE, fig.height=18}
+
+# parameters_to_summarize <- map(c("TV", "omega_", "cor", "sigma"),
+#                                str_subset,
+#                                string = fit_m4$metadata()$stan_variables) %>%
+#   reduce(union) %>%
+#   str_subset("sq", negate = TRUE)
+
+parameters_to_summarize_main <- str_c("TV", c("CL", "VC", "Q", "VP"))
+parameters_to_summarize_variability <- str_c("omega_", c("cl", "vc", "q", "vp"))
+parameters_to_summarize_uncertainty <- str_c("sigma_", c("p", "a"))
+parameters_to_summarize_correlation <- str_subset(fit$metadata()$stan_variables,
+                                                  "cor")
+
+parameters_to_summarize <- c(parameters_to_summarize_main,
+                             parameters_to_summarize_variability,
+                             parameters_to_summarize_uncertainty,
+                             parameters_to_summarize_correlation)
+
+## Summary of parameter estimates
+summary <- summarize_draws(fit_m4$draws(parameters_to_summarize),
+                           mean, median, sd, mcse_mean,
+                           ~quantile2(.x, probs = c(0.025, 0.975)), rhat,
+                           ess_bulk, ess_tail)
+
+## Check the sampler (this is very non-comprehensive)
+sampler_diagnostics <- fit_m4$sampler_diagnostics()
+sum(as_draws_df(sampler_diagnostics)$divergent__)
+
+# Check your largest R-hats. These should be close to 1 (< 1.05 for sure, < 1.02
+# ideally)
+summary %>%
+  select(variable, rhat) %>%
+  arrange(-rhat)
+```
+
+::: vscroll-plot1
+```{r traceplots, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, max.height='300px', cache=TRUE, fig.height=18}
+
+# Density Plots and Traceplots
+mcmc_combo(fit_m4$draws(parameters_to_summarize),
+           combo = c("dens_overlay", "trace"))
+```
+:::
+
+We should look at the posterior to see if there are any parameters that are very highly correlated:
+
+```{r pairs, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, max.height='300px', cache=TRUE, fig.height=12, fig.width=12}
+
+mcmc_pairs(fit_m4$draws(c(parameters_to_summarize_main,
+                          parameters_to_summarize_variability,
+                          parameters_to_summarize_uncertainty)),
+           diag_fun = "dens")
+
+```
+
+We can look at plots of the auto-correlations:
+
+```{r acf, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, max.height='300px', cache=TRUE, fig.height=8}
+
+mcmc_acf(fit_m4$draws(parameters_to_summarize_main),
+         pars = parameters_to_summarize_main)
+
+```
+
+And check the [Leave-one-out cross-validation (LOO)](http://www.stat.columbia.edu/~gelman/research/unpublished/loo_stan.pdf):
+
+```{r loo, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, max.height='300px', cache=TRUE, fig.height=4}
+
+## Check Leave-One-Out Cross-Validation
+fit_m4_loo <- fit_m4$loo()
+fit_m4_loo
+plot(fit_m4_loo, label_points = TRUE)
+
+```
+
+If everything looks ok so far, we will want to obtain posterior parameter estimates (and, since this is simulated data using known parameters, you can compare these parameter estimates to the table with the "truth" (@tbl-true-values-iv-2cmt), but you won't have that in real life, so we won't do that directly here):
+
+```{r summary-table, cache=TRUE}
+
+summary %>%
+  mutate(rse = sd/mean*100) %>%
+  select(variable, mean, sd, rse, q2.5, median, q97.5, rhat,
+         starts_with("ess")) %>%
+  inner_join(neff_ratio(fit_m4, pars = parameters_to_summarize) %>%
+               enframe(name = "variable", value = "n_eff_ratio")) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  knitr::kable(col.names = c("Variable", "Mean", "Std. Dev.", "RSE", "2.5%",
+                             "Median", "97.5%", "$\\hat{R}$", "ESS Bulk",
+                             "ESS Tail", "ESS Ratio"))
+```
+
+Although we've mostly looked at the population parameters so far, we can look at posterior distributions and parameter estimates for individuals:
+
+```{r individual-estimates, class.output="scroll-300", cache=TRUE}
+draws_df <- fit_m4$draws(format = "draws_df")
+
+draws_df %>%
+  gather_draws(CL[ID], VC[ID], Q[ID], VP[ID]) %>%
+  mean_qi(.width = 0.95) %>%
+  select(ID, .variable, .value, .lower, .upper) %>%
+  mutate(across(where(is.double), round, 3),
+         across(c(ID, .variable), as.factor)) %>%
+  DT::datatable(colnames = c("ID", "Variable", "Posterior Mean", "2.5%",
+                             "97.5%"),
+                rownames = FALSE, filter = "top")
+
+```
+
+We can also visualize the full posterior density for each individual:
+
+```{r individual-densities, cache=TRUE, class.output="scroll-300"}
+
+draws_df %>%
+  gather_draws(CL[ID], VC[ID], Q[ID], VP[ID]) %>%
+  ungroup() %>%
+  mutate(across(c(ID, .variable), as.factor)) %>%
+  ggplot(aes(x = .value, group = ID, color = ID)) +
+  stat_density(geom = "line", position = "identity") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  facet_wrap(~.variable, ncol = 1, scales = "free") +
+  ggtitle("Individual Parameter Posterior Densities")
+
+```
+
+We will also want to assess the fits. We can look at a lot of the same plots as we would if we had done a NONMEM fit with FOCEI. We can start with *DV vs. PRED/IPRED*:
+
+```{r dv-vs-pred, class.output="scroll-300", cache=TRUE, fig.width=12}
+post_preds_summary <- draws_df %>%
+  spread_draws(pred[i], ipred[i], dv_ppc[i]) %>%
+  mean_qi(pred, ipred, dv_ppc) %>%
+  mutate(DV = nonmem_data_bloq$DV[nonmem_data_bloq$evid == 0][i],
+         bloq = nonmem_data_bloq$bloq[nonmem_data_bloq$evid == 0][i])
+
+ppc_ind <- post_preds_summary %>%
+  mutate(ID = nonmem_data_bloq$ID[nonmem_data_bloq$evid == 0][i],
+         time = nonmem_data_bloq$time[nonmem_data_bloq$evid == 0][i])
+
+p_dv_vs_pred <- ggplot(post_preds_summary %>%
+                         filter(bloq == 0), aes(x = pred, y = DV)) +
+  geom_point() +
+  theme_bw() +
+  geom_abline(slope = 1, intercept = 0, color = "blue", size = 1.5) +
+  xlab("Population Predictions") +
+  ylab("Observed Concentration") +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.line = element_line(size = 2)) +
+  scale_y_log10() +
+  scale_x_log10()
+
+p_dv_vs_ipred <- ggplot(post_preds_summary %>%
+                          filter(bloq == 0), aes(x = ipred, y = DV)) +
+  geom_point() +
+  theme_bw() +
+  geom_abline(slope = 1, intercept = 0, color = "blue", size = 1.5) +
+  xlab("Individual Predictions") +
+  ylab("Observed Concentration") +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.line = element_line(size = 2)) +
+  scale_y_log10() +
+  scale_x_log10()
+
+ggpubr::ggarrange(p_dv_vs_pred, p_dv_vs_ipred)
+
+```
+
+We should also look at residual plots. We generally want to look at a QQ-plot to check our error distribution assumptions. The below animation shows the QQ-plot of the (individual weighted) residuals by draw.
+
+```{r some-residuals-qq, cache=TRUE, class.output="scroll-300", fig.align = 'center'}
+
+residuals <- draws_df %>%
+  spread_draws(res[i], wres[i], ires[i], iwres[i], ipred[i]) %>%
+  mutate(time = nonmem_data_bloq$time[nonmem_data_bloq$evid == 0][i],
+         bloq = nonmem_data_bloq$bloq[nonmem_data_bloq$evid == 0][i])
+
+some_residuals_qq <- residuals %>%
+  filter(bloq == 0) %>%
+  sample_draws(100) %>%
+  ggplot(aes(sample = iwres)) +
+  geom_qq() +
+  geom_abline() +
+  theme_bw() +
+  transition_manual(.draw)
+
+animate(some_residuals_qq, nframes = 100, width = 384, height = 384, res = 96,
+        dev = "png", type = "cairo")
+```
+
+We also want to look at the individual weighted residuals against time and against individual prediction:
+
+::: vscroll-plot1
+```{r m4-iwres-plots, cache=TRUE, class.output="scroll-300", fig.height=18}
+
+iwres_vs_time <- residuals %>%
+  filter(bloq == 0) %>%
+  sample_draws(9) %>%
+  mutate(qn_lower = qnorm(0.025),
+         qn_upper = qnorm(0.975)) %>%
+  ggplot(aes(x = time, y = iwres)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", size = 1.5) +
+  geom_smooth(se = FALSE, color = "blue", size = 1.5) +
+  geom_hline(aes(yintercept = qn_lower), linetype = "dashed", color = "red",
+             size = 1.25) +
+  geom_hline(aes(yintercept = qn_upper), linetype = "dashed", color = "red",
+             size = 1.25) +
+  theme_bw() +
+  xlab("Time (d)") +
+  facet_wrap(~ .draw, labeller = label_both)
+
+iwres_vs_ipred <- residuals %>%
+  filter(bloq == 0) %>%
+  sample_draws(9) %>%
+  mutate(qn_lower = qnorm(0.025),
+         qn_upper = qnorm(0.975)) %>%
+  ggplot(aes(x = ipred, y = iwres)) +
+  geom_point() +
+  geom_smooth(se = FALSE, color = "blue", size = 1.5) +
+  geom_hline(yintercept = 0, color = "red", size = 1.5) +
+  geom_hline(aes(yintercept = qn_lower), linetype = "dashed", color = "red",
+             size = 1.25) +
+  geom_hline(aes(yintercept = qn_upper), linetype = "dashed", color = "red",
+             size = 1.25) +
+  theme_bw() +
+  xlab("Individual Predictions") +
+  facet_wrap(~ .draw, labeller = label_both)
+
+iwres_vs_time /
+  iwres_vs_ipred
+
+```
+:::
+
+Since all the residuals look good, we can look at the distribution of the (standardized) random effects. We'll use the posterior mean as the point estimate for each individual's random effect.
+
+```{r m4-eta-plots, cache=TRUE, fig.height=8, class.output="scroll-300"}
+
+eta_std <- draws_df %>%
+  spread_draws(eta_cl[ID], eta_vc[ID], eta_q[ID], eta_vp[ID]) %>%
+  mean_qi() %>%
+  select(ID, str_c("eta_", c("cl", "vc", "q", "vp"))) %>%
+  pivot_longer(cols = starts_with("eta"),
+               names_to = "parameter",
+               values_to = "eta",
+               names_prefix = "eta_") %>%
+  group_by(parameter) %>%
+  mutate(eta_std = (eta - mean(eta))/sd(eta)) %>%
+  ungroup() %>%
+  mutate(parameter = toupper(parameter))
+
+
+eta_hist <- eta_std %>%
+  ggplot(aes(x = eta_std, group = parameter)) +
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(color = "blue", size = 1.5) +
+  stat_function(fun = dnorm, args = list(mean = 0, sd = 1),
+                color = "red", size = 1) +
+  scale_x_continuous(name = "Standarized Indiv. Effect",
+                     limits = c(-2.5, 2.5)) +
+  theme_bw(18) +
+  facet_wrap(~parameter, scales = "free_x")
+
+eta_box <- eta_std %>%
+  ggplot(aes(x = parameter, y = eta_std)) +
+  geom_boxplot() +
+  scale_x_discrete(name = "Parameter") +
+  scale_y_continuous(name = "Standarized Indiv. Effect") +
+  theme_bw(18) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+eta_hist /
+  eta_box
+
+```
+
+If we had covariates, we would plot these random effects against the covariates to see any indication that a covariate should be included, but we don't have that in this example, so we'll skip that.
+
+We can look at a *posterior predictive check (PPC)*. To do these, we have simulated a dependent variable value (`dv_ppc` in the Stan code) for each sample from the posterior for each observation - a replication of each observation for each posterior sample. This is similar to a VPC that is commonly done with NONMEM, but is meant to provide replicates of the *observed* data for the *observed* individuals - we will show something even more similar to a VPC later where we simulate new individuals. The point of posterior predictive checking is to see if we can generate data from from our fitted models that looks a lot like the observed data.
+
+::: vscroll-plot1
+```{r m4-ppc, class.output="scroll-300", cache=TRUE, fig.height=24, fig.width=12}
+
+ppc_ind %>%
+  ggplot(aes(x = time, group = ID)) +
+  geom_ribbon(aes(ymin = ipred.lower, ymax = ipred.upper),
+              fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = dv_ppc.lower, ymax = dv_ppc.upper),
+              fill = "blue", alpha = 0.25, show.legend = FALSE) +
+  geom_line(aes(y = ipred), linetype = 1, size = 1.15) +
+  geom_line(aes(y = pred), linetype = 2, size = 1.05) +
+  geom_point(data = ppc_ind %>%
+               filter(bloq == 0),
+             mapping = aes(x = time, y = DV, group = ID),
+             size = 3, color = "red", show.legend = FALSE) +
+  scale_y_log10(name = "Drug Conc. (ug/mL)",
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        legend.position = "bottom") +
+  facet_wrap(~ID, labeller = label_both,
+             ncol = 4, scales = "free")
+
+```
+:::
+
+In the above plot, the solid line is the individual prediction, the dotted line is the population prediction, the red dot is the observed concentration, the darker blue ribbon is a 95% interval for the individual prediction, and the lighter blue ribbon is a 95% interval for an observation (individual prediction + residual error). This plot is a bit angular and can be a bit confusing since we only have replications at the observed time points, but we will revisit this shortly when we make predictions at a dense grid.
+
+#### Making Predictions
+
+As mentioned above, we can also make predictions for
+
+-   The observed individuals. We can simulate at a denser time grid (*i.e.* at unobserved times). I think this is mostly useful to make pictures like the previous one look a little nicer.
+-   Future individuals
+    -   We can simulate many individuals with an already observed dosing regimen and compare the observations to the simulations to assess model fit (this is extremely similar to the standard VPC).
+    -   We can simulate many individuals with an unobserved dosing regimen to predict exposures and responses with that dosing regimen. This should help with dose selection.
+    -   We can simulate clinical trials
+
+For any of these situations, we have a `.stan` file that is written to make the predictions, and we send our fitted object that contains the posterior draws (I've called the most recent fit `fit_m4` in this presentation) through the `.stan` file to make predictions at requested time points given the dosing regimen(s).
+
+##### Predicting Observed Individuals
+
+::: panel-tabset
+###### Predicting Observed Individuals After Fitting {#sec-predicting-observed-1}
+
+After fitting the model, we have the *CmdStanMCMC* object `fit_m4` that contains the draws from the posterior distribution. We will simulate
+
+1.  a population concentration-time profile (*PRED*) for each draw from the posterior that takes into account the uncertainty in the population parameters ($TVCL, \; TVVC, \; TVQ,$ and $TVVP$)
+2.  an individual concentration-time profile (*IPRED*) for each individual for each draw from the posterior. This will create simulated profiles that take into account the uncertainty in the individual PK parameters (here, $CL, \; V_c, \; Q$, and $V_p$)
+3.  an individual concentration-time profile (*DV*) that adds residual variability to the *IPRED*. This will create simulated profiles that take into account residual variability and also the uncertainty in the residual variability parameters (here, $\sigma_p, \; \sigma_a,$ and $\rho_{p,a}$).
+
+We can first look at the `.stan` file that makes the simulations:
+
+```{r observed-predictions-model-1, max.height='450px', comment=NA}
+model_pred_obs <- cmdstan_model(
+  "Torsten/Predict/iv_2cmt_ppa_m4_predict_observed_subjects.stan")
+
+model_pred_obs$print()
+```
+
+You'll notice that this is a stripped-down version of the `.stan` file used to fit the data. This model takes in the previous fit and then makes predictions in the `generated quantities` block based solely on the fit we've already done. Because no fitting is done, only simulation, this is relatively fast. This particular file saves only simulated values for *PRED, IPRED*, and *DV*. But if we wanted, there are numerous other values we could simulate if we wanted ($AUC, \, T_{max}, \, C_{max}, \, C_{trough},\, \ldots$).
+
+Now we'll do the simulations with the `$generate_quantities()` method (as opposed to the `$sample()` method we used for fitting). Because we are making predictions for *observed* individuals, we need to make sure the dosing schemes match the original data set used for fitting, so we use the original `nonmem_data_bloq` data set created before the fitting and manipulate it to add in rows for new timepoints at which we want to simulate:
+
+```{r observed-predictions-data, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE}
+
+new_data_to_simulate <- nonmem_data_bloq %>%
+  # filter(evid == 0) %>%
+  group_by(ID) %>%
+  slice(c(1, n())) %>%
+  expand(time = seq(time[1], time[2], by = 1)) %>%
+  ungroup() %>%
+  mutate(amt = 0,
+         evid = 2,
+         rate = 0,
+         addl = 0,
+         ii = 0,
+         cmt = 2,
+         mdv = 1,
+         ss = 0,
+         DV = NA_real_,
+         c = NA_character_) %>%
+  select(c, ID, time, everything())
+
+observed_data_to_simulate <- nonmem_data_bloq %>%
+  mutate(evid = if_else(evid == 1, 1, 2))
+
+end_of_infusion_to_simulate <- nonmem_data_bloq %>%
+  filter(evid == 1) %>%
+  rename_all(tolower) %>%
+  rename(ID = "id",
+         DV = "dv") %>%
+  mutate(tinf = amt/rate,
+         time = time + tinf,
+         evid = 2,
+         amt = 0,
+         rate = 0,
+         ii = 0,
+         addl = 0,
+         ss = 0)
+
+new_data <- new_data_to_simulate %>%
+  bind_rows(observed_data_to_simulate, end_of_infusion_to_simulate) %>%
+  arrange(ID, time, evid) %>%
+  distinct(ID, time, .keep_all = TRUE) %>%
+  select(-DV, -timenom, -lloq, -bloq, -tinf, -mdv)
+
+
+n_subjects <- new_data %>%  # number of individuals
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_time_new <- nrow(new_data) # total number of time points at which to predict
+
+subj_start <- new_data %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_time_new)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_time_new = n_time_new,
+                  time = new_data$time,
+                  amt = new_data$amt,
+                  cmt = new_data$cmt,
+                  evid = new_data$evid,
+                  rate = new_data$rate,
+                  ii = new_data$ii,
+                  addl = new_data$addl,
+                  ss = new_data$ss,
+                  subj_start = subj_start,
+                  subj_end = subj_end)
+
+preds_obs <- model_pred_obs$generate_quantities(fit_m4,
+                                                data = stan_data,
+                                                parallel_chains = 4,
+                                                seed = 1234)
+
+# preds_obs$save_object(
+#   "Torsten/Preds/iv_2cmt_ppa_m4_predict_observed_subjects.rds")
+
+```
+
+And we can look at the predictions. They should look smoother than the PPC plot from earlier:
+
+::: vscroll-plot1
+```{r observed-predictions-plot, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, fig.height=28, fig.width=12}
+
+preds_obs_df <- preds_obs$draws(format = "draws_df")
+
+post_preds_obs_summary <- preds_obs_df %>%
+  spread_draws(pred[i], ipred[i], dv[i]) %>%
+  mean_qi(pred, ipred, dv)
+
+preds_obs_ind <- post_preds_obs_summary %>%
+  mutate(ID = new_data$ID[i],
+         time = new_data$time[i]) %>%
+  left_join(nonmem_data_bloq %>%
+              filter(mdv == 0) %>%
+              select(ID, time, DV),
+            by = c("ID", "time")) %>%
+  select(ID, time, everything(), -i)
+
+preds_obs_ind %>%
+  ggplot(aes(x = time, group = ID)) +
+  geom_ribbon(aes(ymin = ipred.lower, ymax = ipred.upper),
+              fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = dv.lower, ymax = dv.upper),
+              fill = "blue", alpha = 0.25, show.legend = FALSE) +
+  geom_line(aes(y = ipred), linetype = 1, size = 1.15) +
+  geom_line(aes(y = pred), linetype = 2, size = 1.05) +
+  geom_point(aes(y = DV),
+             size = 3, color = "red", show.legend = FALSE) +
+  scale_y_log10(name = "Drug Conc. (ug/mL)",
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        legend.position = "bottom") +
+  facet_wrap(~ID, labeller = label_both,
+             ncol = 4, scales = "free")
+
+
+```
+:::
+
+###### Predicting Observed Individuals Simultaneously with the Fitting {#sec-predicting-observed-2}
+
+As mentioned previously, it might make sense to go ahead and simulate on a dense time grid for the observed individuals at the same time as fitting, We basically combine what we did in @sec-m4-model when we fit the model with what we did in the previous section when we made predictions for observed individuals.
+
+Let's look at the `.stan` file:
+
+```{r observed-predictions-model-2, max.height='450px', comment=NA}
+model_fit_and_predict <- cmdstan_model(
+  "Torsten/Fit_and_Predict/iv_2cmt_ppa_m4_fit_and_predict.stan",
+  cpp_options = list(stan_threads = TRUE))
+
+model_fit_and_predict$print()
+```
+
+We must prepare both the original data for fitting and *also* create the new dataset with added rows for new time points at which we want to simulate. Then we can look at the posterior summary, and we can look at the predictions. They should look smoother than the PPC plot from earlier:
+
+```{r observed-predictions-data-2, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE,fig.height=28, fig.width=12}
+
+n_subjects <- nonmem_data_bloq %>%  # number of individuals
+  distinct(ID) %>% 
+  count() %>%
+  deframe() 
+
+n_total <- nrow(nonmem_data_bloq)   # total number of records
+
+i_obs <- nonmem_data_bloq %>%
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)
+
+subj_start <- nonmem_data_bloq %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_total)
+
+new_data_to_simulate <- nonmem_data_bloq %>%
+  # filter(evid == 0) %>%
+  group_by(ID) %>%
+  slice(c(1, n())) %>%
+  expand(time = seq(time[1], time[2], by = 1)) %>%
+  ungroup() %>%
+  mutate(amt = 0,
+         evid = 2,
+         rate = 0,
+         addl = 0,
+         ii = 0,
+         cmt = 2,
+         mdv = 1,
+         ss = 0,
+         DV = NA_real_,
+         c = NA_character_) %>%
+  select(c, ID, time, everything())
+
+observed_data_to_simulate <- nonmem_data_bloq %>%
+  mutate(evid = if_else(evid == 1, 1, 2))
+
+end_of_infusion_to_simulate <- nonmem_data_bloq %>%
+  filter(evid == 1) %>%
+  mutate(tinf = amt/rate,
+         time = time + tinf,
+         evid = 2,
+         amt = 0,
+         rate = 0,
+         ii = 0,
+         addl = 0,
+         ss = 0)
+
+new_data <- new_data_to_simulate %>%
+  bind_rows(observed_data_to_simulate, end_of_infusion_to_simulate) %>%
+  arrange(ID, time, evid) %>%
+  distinct(ID, time, .keep_all = TRUE) %>%
+  select(-DV, -timenom, -lloq, -bloq, -tinf, -mdv)
+
+n_time_new_obs <- nrow(new_data) # total number of time points at which to predict
+
+subj_start_new_obs <- new_data %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end_new_obs <- c(subj_start_new_obs[-1] - 1, n_time_new_obs)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_total = n_total,
+                  n_obs = n_obs,
+                  i_obs = i_obs,
+                  ID = nonmem_data_bloq$ID,
+                  amt = nonmem_data_bloq$amt,
+                  cmt = nonmem_data_bloq$cmt,
+                  evid = nonmem_data_bloq$evid,
+                  rate = nonmem_data_bloq$rate,
+                  ii = nonmem_data_bloq$ii,
+                  addl = nonmem_data_bloq$addl,
+                  ss = nonmem_data_bloq$ss,
+                  time = nonmem_data_bloq$time,
+                  dv = nonmem_data_bloq$DV,
+                  lloq = nonmem_data_bloq$lloq,
+                  bloq = nonmem_data_bloq$bloq,
+                  subj_start = subj_start,
+                  subj_end = subj_end,
+                  scale_tvcl = 2,
+                  scale_tvvc = 10,
+                  scale_tvq = 2,
+                  scale_tvvp = 20,
+                  scale_tvka = 1,
+                  scale_omega_cl = 0.4,
+                  scale_omega_vc = 0.4,
+                  scale_omega_q = 0.4,
+                  scale_omega_vp = 0.4,
+                  scale_omega_ka = 0.4,
+                  lkj_df_omega = 2,
+                  scale_sigma_p = 0.5,
+                  scale_sigma_a = 1,
+                  lkj_df_sigma = 2,
+                  n_time_new_obs = n_time_new_obs,
+                  time_new_obs = new_data$time,
+                  amt_new_obs = new_data$amt,
+                  cmt_new_obs = new_data$cmt,
+                  evid_new_obs = new_data$evid,
+                  rate_new_obs = new_data$rate,
+                  ii_new_obs = new_data$ii,
+                  addl_new_obs = new_data$addl,
+                  ss_new_obs = new_data$ss,
+                  subj_start_new_obs = subj_start_new_obs,
+                  subj_end_new_obs = subj_end_new_obs)
+
+fit_with_preds <- model_fit_and_predict$sample(
+  data = stan_data,
+  chains = 4,
+  parallel_chains = 4,
+  threads_per_chain = 2,
+  iter_warmup = 500,
+  iter_sampling = 1000,
+  adapt_delta = 0.8,
+  refresh = 500,
+  max_treedepth = 10,
+  init = function() list(TVCL = rlnorm(1, log(0.3), 0.3),
+                         TVVC = rlnorm(1, log(5), 0.3),
+                         TVQ = rlnorm(1, log(2), 0.3),
+                         TVVP = rlnorm(1, log(5), 0.3),
+                         omega = rlnorm(5, log(0.3), 0.3),
+                         sigma = rlnorm(2, log(0.5), 0.3)))
+
+
+summary_with_preds <- summarize_draws(
+  fit_with_preds$draws(parameters_to_summarize),
+  mean, median, sd, mcse_mean,
+  ~quantile2(.x, probs = c(0.025, 0.975)), rhat,
+  ess_bulk, ess_tail)
+
+summary_with_preds %>%
+  mutate(rse = sd/mean*100) %>%
+  select(variable, mean, sd, rse, q2.5, median, q97.5, rhat,
+         starts_with("ess")) %>%
+  inner_join(neff_ratio(fit_with_preds, pars = parameters_to_summarize) %>%
+               enframe(name = "variable", value = "n_eff_ratio")) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  knitr::kable(col.names = c("Variable", "Mean", "Std. Dev.", "RSE", "2.5%",
+                             "Median", "97.5%", "$\\hat{R}$", "ESS Bulk",
+                             "ESS Tail", "ESS Ratio"))
+
+preds_obs_df_2 <- fit_with_preds$draws(c("ipred_new_obs", "pred_new_obs",
+                                         "dv_new_obs"),
+                      format = "draws_df") %>%
+  rename_with(~str_remove(., "_new_obs"))
+
+post_preds_obs_summary_2 <- preds_obs_df_2 %>%
+  spread_draws(pred[i], ipred[i], dv[i]) %>%
+  mean_qi(pred, ipred, dv)
+
+preds_obs_ind_2 <- post_preds_obs_summary_2 %>%
+  mutate(ID = new_data$ID[i],
+         time = new_data$time[i]) %>%
+  left_join(nonmem_data_bloq %>%
+              filter(mdv == 0) %>%
+              select(ID, time, DV),
+            by = c("ID", "time")) %>%
+  select(ID, time, everything(), -i)
+
+preds_obs_ind_2 %>%
+  ggplot(aes(x = time, group = ID)) +
+  geom_ribbon(aes(ymin = ipred.lower, ymax = ipred.upper),
+              fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = dv.lower, ymax = dv.upper),
+              fill = "blue", alpha = 0.25, show.legend = FALSE) +
+  geom_line(aes(y = ipred), linetype = 1, size = 1.15) +
+  geom_line(aes(y = pred), linetype = 2, size = 1.05) +
+  geom_point(aes(y = DV),
+             size = 3, color = "red", show.legend = FALSE) +
+  scale_y_log10(name = "Drug Conc. (ug/mL)",
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        legend.position = "bottom") +
+  facet_wrap(~ID, labeller = label_both,
+             ncol = 4, scales = "free")
+
+```
+:::
+
+##### Predicting New Individuals {#sec-predicting-new}
+
+This has a relatively similar setup as when we were predicting the observed individuals after fitting. The difference now is that
+
+1.  We can look at new dosing regimens if we want.
+2.  For each draw from the posterior, we create new individuals by sampling new individual parameter values (while before we used the same individual parameter values as the observed individuals)
+
+When we simulate future subjects, we will simulate $n_{mcmc}$ (here, 4000) individuals for each dosing regimen, one individual for each sample from the posterior. We will simulate:
+
+1.  individual concentration-time profiles (*CP*) for each new individual for each draw from the posterior.
+2.  an individual concentration-time profile (*DV*) that adds residual variability to the *CP*.
+
+These simulations will create simulated profiles that take into account all sources of uncertainty (*i.e.* uncertainty in the parameter values) and variability (between and within individuals).
+
+We can first look at the `.stan` file that makes the simulations:
+
+```{r new-predictions-model, max.height='450px', comment=NA}
+model_pred_new <- cmdstan_model(
+  "Torsten/Predict/iv_2cmt_ppa_m4_predict_new_subjects.stan")
+
+model_pred_new$print()
+```
+
+It looks similar to the file that predicts for observed individuals, but you'll notice that here, new $\eta_{CL_i}, \; \eta_{V_{c_i}}, \; \eta_{Q_i}$ and $\eta_{V_{p_i}}$ values are simulated as opposed to the previous file which uses the fitted $\eta$ values.
+
+As our example, we'll simulate new individuals with differing dosing schemes:
+
+1.  400 mg *Q4W*
+2.  800 mg *Q4W*
+3.  1200 mg *Q4W*
+4.  1600 mg *Q4W*
+5.  400 mg *Q2W*
+6.  800 mg *Q2W*
+7.  600 mg *Q3W*
+8.  1200 mg *Q3W*
+
+I want to simulate 1) and 2) so I can do a pseudo-VPC to see how our model has done and to generalize our observed data to a larger population. 3) and 4) might be to explore a possible dose escalation. For 5)-8), we might be wondering if Q2W or Q3W dosing will better keep the subjects' exposures in the therapeutic range. We can also predict the population distribution of exposure metrics, *e.g.* $AUC, \; C_{max_{ss}}, \, C_{trough_{ss}},\, \ldots$, for any of these dosing regimens.
+
+```{r new-predictions-data, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE}
+dosing_data_q4w <- mrgsolve::expand.ev(ii = 28, until = 168, tinf = 1/24,
+                                       cmt = 2, evid = 1,
+                                       amt = c(400, 800, 1200, 1600),
+                                       ss = 0, mdv = 1) %>%
+  mrgsolve::realize_addl() %>%
+  as_tibble()
+
+dosing_data_q2w <- mrgsolve::expand.ev(ID = 1, ii = 14, until = 168,
+                                       tinf = 1/24, cmt = 2, evid = 1,
+                                       amt = c(400, 800), ss = 0, mdv = 1) %>%
+  mrgsolve::realize_addl() %>%
+  as_tibble() %>%
+  mutate(ID = ID + 4)
+
+dosing_data_q3w <- mrgsolve::expand.ev(ID = 1, ii = 21, until = 168,
+                                       tinf = 1/24, cmt = 2, evid = 1,
+                                       amt = c(600, 1200), ss = 0, mdv = 1) %>%
+  mrgsolve::realize_addl() %>%
+  as_tibble() %>%
+  mutate(ID = ID + 6)
+
+dosing_data <- bind_rows(dosing_data_q4w, dosing_data_q2w, dosing_data_q3w)
+
+t1 <- dosing_data %>%
+  select(time) %>%
+  distinct() %>%
+  deframe()
+
+t2 <- dosing_data %>%
+  mutate(time = time + tinf) %>%
+  select(time) %>%
+  distinct() %>%
+  deframe()
+
+times_new <- tibble(time = sort(unique(c(t1, t2, seq(1, 168, by = 1)))))
+
+new_data <- bind_rows(replicate(max(dosing_data$ID), times_new,
+                                simplify = FALSE)) %>%
+  mutate(ID = rep(1:max(dosing_data$ID), each = nrow(times_new)),
+         amt = 0,
+         evid = 0,
+         rate = 0,
+         addl = 0,
+         ii = 0,
+         cmt = 2,
+         mdv = 1,
+         ss = 0) %>%
+  filter(time != 0) %>%
+  select(ID, time, everything()) %>%
+  bind_rows(dosing_data) %>%
+  arrange(ID, time)
+
+
+# number of individuals in the original dataset
+n_subjects <- fit_m4$metadata()$stan_variable_sizes$Z[2]
+
+n_subjects_new <- new_data %>%  # number of new individuals
+  distinct(ID) %>%
+  count() %>%
+  deframe()
+
+n_time_new <- nrow(new_data) # total number of time points at which to predict
+
+subj_start <- new_data %>%
+  mutate(row_num = 1:n()) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(row_num) %>%
+  deframe()
+
+subj_end <- c(subj_start[-1] - 1, n_time_new)
+
+stan_data <- list(n_subjects = n_subjects,
+                  n_subjects_new = n_subjects_new,
+                  n_time_new = n_time_new,
+                  time = new_data$time,
+                  amt = new_data$amt,
+                  cmt = new_data$cmt,
+                  evid = new_data$evid,
+                  rate = new_data$rate,
+                  ii = new_data$ii,
+                  addl = new_data$addl,
+                  ss = new_data$ss,
+                  subj_start = subj_start,
+                  subj_end = subj_end)
+
+preds_new <- model_pred_new$generate_quantities(fit_m4,
+                                                data = stan_data,
+                                                parallel_chains = 4,
+                                                seed = 1234)
+```
+
+And now we can look at the predictions:
+
+```{r new-preds-plot, eval=TRUE, echo=TRUE, class.output="scroll-300", class.source='fold-show', cache=TRUE, fig.height=14, fig.width=12}
+preds_new_df <- preds_new$draws(format = "draws_df")
+
+post_preds_new_summary <- preds_new_df %>%
+  spread_draws(cp[i], dv[i]) %>%
+  median_qi(cp, dv)
+
+regimens <- c(str_c(c(400, 800, 1200, 1600), " mg Q4W"),
+              str_c(c(400, 800), " mg Q2W"),
+              str_c(c(600, 1200), " mg Q3W"))
+
+preds_new_ind <- post_preds_new_summary %>%
+  mutate(ID = new_data$ID[i],
+         time = new_data$time[i]) %>%
+  select(ID, time, everything(), -i) %>%
+  mutate(regimen = factor(regimens[ID],
+                          levels = regimens))
+
+ggplot(preds_new_ind, aes(x = time, group = regimen)) +
+  geom_ribbon(aes(ymin = dv.lower, ymax = dv.upper),
+              fill = "blue", alpha = 0.25, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = cp.lower, ymax = cp.upper),
+              fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = cp), linetype = 1, size = 1.15) +
+  geom_line(aes(y = dv), linetype = 2, size = 1.05) +
+  scale_y_log10(name = "Drug Conc. (ug/mL)",
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        legend.position = "bottom") +
+  facet_wrap(~ regimen, ncol = 2)
+```
+
+And to look at the pseudo-VPC, we can overlay the observed data on the plots with the same planned dosing regimens:
+
+```{r pseudo-vpc, cache=TRUE, fig.align="center", fig.width=12}
+
+preds_new_ind %>%
+  filter(regimen %in% c("400 mg Q4W", "800 mg Q4W")) %>%
+  ggplot(aes(x = time, group = regimen)) +
+  geom_ribbon(aes(ymin = dv.lower, ymax = dv.upper),
+              fill = "blue", alpha = 0.25, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = cp.lower, ymax = cp.upper),
+              fill = "blue", alpha = 0.5, show.legend = FALSE) +
+  geom_line(aes(y = cp), linetype = 1, size = 1.15) +
+  geom_line(aes(y = dv), linetype = 2, size = 1.05) +
+  geom_point(data = nonmem_data_bloq %>%
+               rename_all(tolower) %>%
+               group_by(id) %>%
+               mutate(Dose = max(amt, na.rm = TRUE),
+                      regimen = str_c(Dose, " mg Q4W")) %>%
+               ungroup() %>%
+               filter(regimen %in% c("400 mg Q4W", "800 mg Q4W"),
+                      mdv == 0),
+             mapping = aes(x = time, y = dv, group = regimen),
+             color = "red", inherit.aes = FALSE) +
+  scale_y_log10(name = "Drug Conc. (ug/mL)",
+                limits = c(NA, NA)) +
+  scale_x_continuous(name = "Time (w)",
+                     breaks = seq(0, 168, by = 28),
+                     labels = seq(0, 168/7, by = 4)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 18, face = "bold"),
+        legend.position = "bottom") +
+  facet_wrap(~regimen, ncol = 2)
+```
+
+## Other Topics
+
+We won't have enough time to thoroughly go through these further topics, but I think it will be useful to show a couple other things that are common.
+
+### A Model with Covariates
+
+We often want to estimate the effect of covariates on PK. Common covariates are patient characteristics like demographics, body weight, body mass index, concomitant medications, renal function, etc. There are multiple functional forms for both continuous and categorical variables that we can choose from to incorporate covariate effects, and I encourage you to refer to Ch. 5 in the book [here](https://www.wiley.com/en-us/Introduction+to+Population+Pharmacokinetic+Pharmacodynamic+Analysis+with+Nonlinear+Mixed+Effects+Models-p-9780470582299)[^poppk-17] to see the most common forms for incorporating covariate effects. For this presentation I'll just give an idea of how it could be done, so I'll incorporate *body weight (wt)* as a continuous covariate on clearance using a power model and *sex* as a categorical covariate on central compartment volume using a proportional shift.
+
+[^poppk-17]: In any case, I recommend this book to all NONMEM users. It is a phenomenal reference that puts all of the important elements of NONMEM in one place rather than spread across a ton of user guides.
+
+```{=tex}
+\begin{align}
+CL_i &= TVCL * \left(\frac{wt}{70}\right)^{\theta_{CL}} * e^{\eta_{CL_i}} \notag \\
+V_{c_i} &= TVVC * \left(1 + \theta_{sex}\times sex_i\right) * e^{\eta_{V_{c_i}}}
+\end{align}
+```
+```{r cov-model, max.height='450px', comment=NA, class.output="scroll-300", cache=TRUE}
+model_cov <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_m4_cov.stan")
+
+model_cov$print()
+```
+
+### ODE Models
+
+Ordinary differential equations (ODEs) arise when we want to determine a function $y(t)$, but we only know the derivative of that function $\frac{dy}{dt}$, so we know the rate at which the quantity changes, but not the quantity itself. Many of the models we use in the PK/PD world are based off of a system of ODEs, whether implicitly or explicitly. Some systems such as the one in @eq-2cmt-macro-genode have analytical solutions, while others must be solved numerically.
+
+In the special case where the system of ODEs is [linear](https://en.wikipedia.org/wiki/Matrix_exponential#Linear_differential_equations), we can use a matrix exponential solution to solve the system. This can be implemented directly in [Stan](https://mc-stan.org/docs/2_29/stan-users-guide/solving-a-system-of-linear-odes-using-a-matrix-exponential.html) or [Torsten](https://metrumresearchgroup.github.io/Torsten/function/linode/). In the general case, we use numerical integrators (they work with both linear and non-linear systems) to solve the system of ODEs. Due to the computational complexity of solving ODEs, it is generally good practice to use the analytical solution if it's available, a matrix exponential if we have a linear system, and a numerical integrator if we have a non-linear system. Don't use a tool that is more computationally expensive if you don't have to.
+
+#### One-Compartment Depot
+
+The system of ODEs shown below is a simple system describing the one-compartment model with first order absorption. We know this system has a simple analytical solution, but for the purposes of learning, I'm going to ignore my best practices advice and show how to implement the matrix exponential solution for this linear system and also the general ODE solution using a numerical solver:$$\begin{align}
+\frac{dA_d}{dt} &= -k_a*A_d \notag \\
+\frac{dA_c}{dt} &= k_a*A_d - \frac{CL}{V}*A_c   \\
+\end{align}$$ {#eq-1cmt-genode}
+
+##### Matrix Exponential
+
+Since the system in @eq-1cmt-genode is linear, we can write this in the form $$y'(t) = \mathbf{K}y(t)$$ where \begin{equation*}
+\mathbf{K} =
+\begin{bmatrix}
+-k_a & 0            \\
+k_a  & -\frac{CL}{V} \\
+\end{bmatrix}
+\end{equation*}
+
+To implement this in Stan with Torsten, we use the `pmx_solve_linode` ODE function. It is similar to the `pmx_solve_onecpt` and `pmx_solve_twocpt` functions that we have used in previous sections in that it accepts the standard NONMEM data arguments such as *AMT, EVID, II, RATE, ...*. The main difference here is that we must input the $\mathbf{K}$ matrix here (instead of an array of the individual parameters), and the bioavailability and lag-time parameters are required here (they were optional before). The Stan code can be seen here:
+
+```{r linear-model-print, comment=NA, max.height='450px', cache=TRUE}
+linear_ode_model <- cmdstan_model(
+  "Torsten/Fit/depot_1cmt_ppa_m4_ode_linear.stan",
+  cpp_options = list(stan_threads = TRUE))
+
+linear_ode_model$print()
+```
+
+##### General ODE {#sec-depot-1cmt-genode}
+
+To implement the system of ODEs shown above in @eq-1cmt-genode we need to write a function in the `functions` block of our Stan code to describe the system and then use one of the ODE solvers provided by Stan/Torsten to solve the system. Torsten provides 3 solvers:
+
+1.  `pmx_solve_rk45` - Implements the Runge-Kutta 4/5 method. It is generally useful for non-stiff systems.
+2.  `pmx_solve_bdf` - Implements the backward-differentiation formula. It is generally useful for stiff systems.
+3.  `pmx_solve_adams` - Implements the Adams-Moulton method. It is generally useful for non-stiff systems when a higher accuracy is needed.
+
+In practice, if you don't know much about the system, try the `rk45` integrator first and then move on to the `bdf` integrator if the system is potentially stiff.
+
+```{r general-model-print, comment=NA, max.height='450px', cache=TRUE}
+general_ode_model <- cmdstan_model(
+  "Torsten/Fit/depot_1cmt_ppa_m4_ode_general.stan",
+  cpp_options = list(stan_threads = TRUE))
+
+general_ode_model$print()
+```
+
+#### Indirect Response Models
+
+One common type of ODE model that we use are [indirect response models](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4207304/) that exhibit "stimulation of the production or dissipation of factors controlling the measured effect." There are 4 common types of indirect response models:
+
+<p align="center">
+
+<img src="Figures/indirect_response_models_2.PNG"/>
+
+<!-- Note: Both of the Inhibition models (IR I and IR II) can also have an  --> <!-- $I_{max}$ parameter that control maximum inhibition, but this is commonly set  --> <!-- to 1. -->
+
+</p>
+
+In the notation above $R$ is the response, $k_{in}$ represents the zero-order rate constant for production of the response, $k_{out}$ represents the first-order rate constant for loss of the response, $C_p$ is the plasma concentration (often described by a one- or two-compartment PK model), $I_{max}$ is the maximum fractional inhibition (sometimes fixed to 1) and $IC_{50}$ is the drug concentration that produces 50% of the maximum inhibition for IR1 and IR2, and $S_{max}$ (more commonly $E_{max}$) is the maximum stimulation and $SC_{50}$ (more commonly $EC_{50}$) is the drug concentration that produces 50% of the maximum stimulation for IR3 and IR4.
+
+##### Indirect Response I: PK Model
+
+If we assume a two-compartment model with IV infusion, the full system of ODEs for the Indirect Response I (IR1) model is:$$\begin{align}
+\frac{dA_c}{dt} &= rate_{in} - \left(\frac{CL}{V_c} + \frac{Q}{V_c}\right)A_C + \frac{Q}{V_p}A_p  \notag \\
+\frac{dA_p}{dt} &= \frac{Q}{V_c}A_c - \frac{Q}{V_p}A_p \\
+\frac{dR}{dt} &= k_{in}\left(1 - \frac{I_{max}*\left(\frac{A_c}{V_c}\right)^\gamma}{IC_{50}^\gamma + \left(\frac{A_c}{V_c}\right)^\gamma}\right) - k_{out}R
+\end{align}$$ {#eq-iv-2cmt-macro-ir1-full-ode}
+
+This model has the standard two-compartment PK model, and the response equation is just like the one in the figure above but also has the parameter $\gamma$ controlling the steepness of the response curve, but this is commonly set to 1.
+
+::: panel-tabset
+##### Indirect Response I: Full System of ODEs
+
+We can fit this data with a model that is written with the full system of ODEs in @eq-iv-2cmt-macro-ir1-full-ode. This is done in a similar fashion as the one-compartment model from @sec-depot-1cmt-genode, *i.e.* we need to write a function in the `functions` block of our Stan code to describe the system and then use one of the ODE solvers provided by Stan/Torsten to solve the system. Let's look at the Stan code:
+
+```{r ir1-general-model-print, comment=NA, max.height='450px', cache=TRUE}
+ir1_ode_model <- cmdstan_model("Torsten/Fit/iv_2cmt_ppa_ir1_lognormal_m4.stan",
+  cpp_options = list(stan_threads = TRUE))
+
+ir1_ode_model$print()
+```
+
+##### Coupled Model with an Analytical Solution to PK and Numerical Solution to PD ODE
+
+If you look at the system of ODEs in @eq-iv-2cmt-macro-ir1-full-ode, you will notice that the the first two compartments look like a two-compartment IV model, a system that we have an analytical solution for, In situations like these where our PK model does not depend on our PD model, we can use the [coupled ODE model function](https://metrumresearchgroup.github.io/Torsten/function/coupled/) where the analytical solution for the PK is introduced into the ODE for the PD for numerical integration. This should in theory be simpler and faster computationally due to the smaller system of ODEs that need to be solved numerically. Let's look at the Stan code:
+
+```{r ir1-coupled-model-print, comment=NA, max.height='450px', cache=TRUE}
+ir1_coupled_model <- cmdstan_model(
+  "Torsten/Fit/iv_2cmt_ppa_ir1_lognormal_m4_coupled.stan",
+  cpp_options = list(stan_threads = TRUE))
+
+ir1_coupled_model$print()
+```
+:::
+
+## Session Info
+
+```{r}
+sessionInfo()
+```

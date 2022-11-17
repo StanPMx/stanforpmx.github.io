@@ -1,0 +1,807 @@
+---
+title: "Scratch button check"
+editor: visual
+---
+
+## Button check
+
+```{r}
+x <- rnorm(10000, 0, 2)
+```
+
+
+<p>
+  <a class="btn btn-primary" data-bs-toggle="collapse" href="#collapseExample" role="button" aria-expanded="false" aria-controls="collapseExample">
+    Link with href blah
+  </a>
+  <button class="btn btn-primary" type="button" data-bs-toggle="collapse" data-bs-target="#collapseExample2" aria-expanded="false" aria-controls="collapseExample2">
+    Button with data-bs-target
+  </button>
+</p>
+<div class="collapse" id="collapseExample">
+  <div class="card card-body">
+    Some placeholder content for the collapse component.
+    
+```{r}
+hist(x)
+
+plot(1:5, 5:1)
+```
+    
+    
+  </div>
+</div>
+<div class="collapse" id="collapseExample2">
+  <div class="card card-body">
+    Some placeholder content for the collapse component. Then it goes down
+  </div>
+</div>
+
+## Button Check 2
+
+```{r set, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE, echo = TRUE, message = FALSE, 
+                      warning = FALSE, include = TRUE)
+```
+
+<!-- ```{css, echo=FALSE} -->
+<!-- pre { -->
+<!--   max-height: 300px; -->
+<!--   overflow-y: auto; -->
+<!-- } -->
+
+<!-- pre[class] { -->
+<!--   max-height: 300px; -->
+<!-- } -->
+<!-- ``` -->
+
+```{css, echo=FALSE}
+.scroll-300 {
+  max-height: 300px;
+  overflow-y: auto;
+  background-color: inherit;
+}
+```
+
+```{css, echo=FALSE}
+.remark-slide-scaler {
+    overflow-y: auto;
+}
+```
+
+
+```{r setup, include=FALSE}
+options(width = 60)
+local({
+  hook_output <- knitr::knit_hooks$get('output')
+  knitr::knit_hooks$set(output = function(x, options) {
+    if (!is.null(options$max.height)) options$attr.output <- c(
+      options$attr.output,
+      sprintf('style="max-height: %s;"', options$max.height)
+    )
+    hook_output(x, options)
+  })
+})
+
+```
+
+```{r package_load, include=TRUE, message=FALSE, warning=FALSE}
+
+library(collapsibleTree)
+library(mrgsolve)
+library(patchwork)
+library(tidyverse)
+library(gganimate)
+library(bayesplot)
+library(tidybayes)
+library(loo)
+library(posterior)
+library(cmdstanr)
+
+```
+
+<style>
+.vscroll-plot {
+    height: 600px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+
+<style>
+.vscroll-plot1 {
+    height: 600px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+
+<style>
+.vscroll-plot2 {
+    height: 400px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+
+## Introduction
+
+We can use Stan and Torsten for the whole PK/PD workflow. In this section we 
+will talk briefly about simulation and extensively about fitting a PopPK model
+to observed data and simulating/predicting future data given the results of the
+model fit.
+
+## Simple Example - Single Dose, Single Individual
+
+First we will show a very simple example - a single oral dose for a single 
+individual: 
+
+### PK Model {#toy-pk-model}
+
+The data-generating model is:
+
+\begin{align}
+C_i &= f(\mathbf{\theta}, t_i)*e^{\epsilon_i}, \; \epsilon_i \sim 
+N(0, \sigma^2) \notag \\
+&= \frac{D}{V}\frac{k_a}{k_a - k_e}\left(e^{-k_e(t-t_D)} - e^{-k_a(t-t_D)} 
+\right)*e^{\epsilon_i}
+\end{align}
+
+where $\mathbf{\theta} = \left[k_a, CL, V\right]^\top$ is a vector containing 
+the individual parameters for this individual, $k_e = \frac{CL}{V}$, $D$ is the 
+dose amount, and $t_D$ 
+is the time of the dose. We will have observations at times *0.5, 1, 2, 4, 12*, 
+and *24* and simulate the data with a dose of 200 mg and true parameter values 
+as follows:
+
+```{r true-values-single, include=TRUE, eval=TRUE, echo=FALSE}
+tribble(
+  ~Parameter, ~Value, ~Units    , ~Description,
+  "$CL$"     , 5     , "$\\frac{L}{h}$", "Clearance",
+  "$V$"      , 50    ,  "$L$"    , "Central compartment volume",
+  "$k_a$"    , 0.5   , "$h^{-1}$", "Absorption rate constant",
+  "$\\sigma$", 0.2   , "-", "Standard deviation for lognormal residual error",
+) %>%
+  knitr::kable(align = "lrcl", booktabs = TRUE, 
+               caption = "True Parameter Values for Single Individual")
+
+```
+
+### Simulating Data 
+
+Many of you who simulate data in *R* probably use a package like *mrgsolve* or
+*RxODE*, and those are perfectly good tools, but we can also do our simulations
+directly in Stan.
+
+::: {.panel-tabset}
+
+#### Stan
+
+```{r model-single, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+model_simulate_stan <- cmdstan_model(
+  "Stan/Simulate/depot_1cmt_lognormal_single.stan")  
+
+model_simulate_stan$print()
+```
+
+```{r simulate-single, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE, results='hide'}
+
+times_to_observe <- c(0.5, 1, 2, 4, 12, 24)
+
+times_to_simulate <- times_to_observe %>% 
+  c(seq(0, 24, by = 0.25)) %>% 
+  sort() %>% 
+  unique()
+
+stan_data_simulate <- list(n_obs = length(times_to_simulate),
+                           dose = 200,
+                           time = times_to_simulate,
+                           time_of_first_dose = 0,
+                           CL = 5,
+                           V = 50,
+                           KA = 0.5, 
+                           sigma = 0.2)
+
+simulated_data_stan <- model_simulate_stan$sample(data = stan_data_simulate,
+                                                  fixed_param = TRUE,
+                                                  seed = 1,
+                                                  iter_warmup = 0,
+                                                  iter_sampling = 1,
+                                                  chains = 1,
+                                                  parallel_chains = 1,
+                                                  show_messages = TRUE) 
+
+data_stan <- simulated_data_stan$draws(format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>% 
+  mutate(time = times_to_simulate[i]) %>%
+  ungroup() %>% 
+  select(time, cp, dv)
+
+observed_data_stan <- data_stan %>%  
+  filter(time %in% times_to_observe) %>% 
+  select(time, dv)
+
+```
+
+```{r single-data-table-stan, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+observed_data_stan %>% 
+  mutate(dv = round(dv, 3)) %>% 
+  knitr::kable(col.names = c("Time", "Concentration"),
+               caption = "Observed Data for a Single Individual") %>% 
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+And here we can see the observed data overlayed on top of the "truth".
+
+```{r single-data-plot, cache=TRUE, eval=TRUE, echo=TRUE, include=TRUE}
+ggplot(mapping = aes(x = time)) +
+  geom_line(data = data_stan,
+            mapping = aes(y = cp)) +
+  geom_point(data = observed_data_stan,
+             mapping = aes(y = dv), 
+             color = "red", size = 3) +
+  theme_bw(18) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+
+```
+
+#### Stan + Torsten
+
+```{r model-single-torsten, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+set_cmdstan_path("~/Torsten/cmdstan/")
+
+model_simulate_torsten <- cmdstan_model(
+  "Torsten/Simulate/depot_1cmt_lognormal_single.stan") 
+  
+model_simulate_torsten$print()
+```
+
+```{r simulate-single-torsten, cache=TRUE, max.height='300px', comment=NA, results='hide', eval=TRUE, echo=TRUE, include=TRUE}
+
+times_to_observe <- c(0.5, 1, 2, 4, 12, 24)
+
+times_to_simulate <- times_to_observe %>% 
+  c(seq(0.25, 24, by = 0.25)) %>% 
+  sort() %>% 
+  unique()
+
+nonmem_data_single <- mrgsolve::ev(ID = 1, amt = 200, cmt = 1, evid = 1,
+                                   rate = 0, ii = 0, addl = 0, ss = 0) %>%
+  as_tibble() %>%
+  bind_rows(tibble(ID = 1, time = times_to_simulate, amt = 0, cmt = 2, evid = 0,
+                   rate = 0, ii = 0, addl = 0, ss = 0))
+
+torsten_data_simulate <- with(nonmem_data_single,
+                              list(n_obs = nrow(nonmem_data_single),
+                                   amt = amt,
+                                   cmt = cmt,
+                                   evid = evid,
+                                   rate = rate,
+                                   ii = ii,
+                                   addl = addl,
+                                   ss = ss,
+                                   time = time,
+                                   CL = 5,
+                                   V = 50,
+                                   KA = 0.5,
+                                   sigma = 0.2))
+
+simulated_data_torsten <- model_simulate_torsten$sample(data = torsten_data_simulate,
+                                                        fixed_param = TRUE,
+                                                        seed = 1,
+                                                        iter_warmup = 0,
+                                                        iter_sampling = 1,
+                                                        chains = 1,
+                                                        parallel_chains = 1,
+                                                        show_messages = TRUE)
+
+data_torsten <- simulated_data_torsten$draws(format = "draws_df") %>%
+  spread_draws(cp[i], dv[i]) %>%
+  mutate(time = times_to_simulate[i]) %>%
+  ungroup() %>%
+  select(time, cp, dv)
+
+observed_data_torsten <- data_torsten %>%
+  filter(time %in% times_to_observe) %>%
+  select(time, dv)
+
+```
+
+```{r single-data-table-torsten, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+observed_data_torsten %>%
+  mutate(dv = round(dv, 3)) %>%
+  knitr::kable(col.names = c("Time", "Concentration"),
+               caption = "Observed Data for a Single Individual") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+And here we can see the observed data overlayed on top of the "truth".
+
+```{r single-data-plot-torsten, cache=TRUE, eval=TRUE, echo=FALSE, include=TRUE}
+ggplot(mapping = aes(x = time)) +
+  geom_line(data = data_torsten,
+            mapping = aes(y = cp)) +
+  geom_point(data = observed_data_torsten,
+             mapping = aes(y = dv),
+             color = "red", size = 3) +
+  theme_bw(18) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+
+```
+
+:::
+
+### Fitting the Data {#sec-single-individual-fit-stan-and-torsten} 
+
+Now we want to fit the data^[Note that I'll fit the data from the Torsten
+simulation. Either would be fine, but I want to fit the same data whether I'm
+fitting with pure Stan code or with Stan + Torsten.] to our model. We 
+write the model in a ```.stan``` file^[You could also write the model inline in 
+a string, but I think that isn't good practice in general, and especially when
+the model is hundreds of lines long.] (analogous to a ```.ctl``` or ```.mod```
+file in NONMEM):
+
+::: {.panel-tabset}
+
+#### Stan 
+
+I've first written a model using pure Stan code. Let's look at the model. 
+
+```{r fit-single-stan-model, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+model_fit_stan <- cmdstan_model(
+  "Stan/Fit/depot_1cmt_lognormal_single.stan")  
+
+model_fit_stan$print()
+```
+
+Now we prepare the data for Stan and fit it:
+
+```{r fit-single-stan, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+stan_data_fit <- list(n_obs = nrow(observed_data_torsten),
+                      dose = 200,
+                      time = observed_data_torsten$time,
+                      time_of_first_dose = 0,
+                      dv = observed_data_torsten$dv,
+                      scale_cl = 10,
+                      scale_v = 10,
+                      scale_ka = 1,
+                      scale_sigma = 0.5,
+                      n_pred = length(times_to_simulate),
+                      time_pred = times_to_simulate)
+
+
+fit_single_stan <- model_fit_stan$sample(data = stan_data_fit,
+                                         chains = 4,
+                                         # parallel_chains = 4,
+                                         iter_warmup = 1000,
+                                         iter_sampling = 1000,
+                                         adapt_delta = 0.95,
+                                         refresh = 500,
+                                         max_treedepth = 15,
+                                         seed = 8675309,
+                                         init = function() 
+                                           list(CL = rlnorm(1, log(8), 0.3),
+                                                V = rlnorm(1, log(40), 0.3),
+                                                KA = rlnorm(1, log(0.8), 0.3),
+                                                sigma = rlnorm(1, log(0.3), 0.3)))
+
+```
+
+
+#### Stan + Torsten 
+
+I've now written a model that uses Torsten's built-in function for a 
+one-compartment PK model. Let's look at the model. 
+
+```{r fit-single-torsten-model, cache=FALSE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+model_fit_torsten <- cmdstan_model(
+  "Torsten/Fit/depot_1cmt_lognormal_single.stan")   
+
+model_fit_torsten$print()
+```
+
+Now we prepare the data for the Stan model with Torsten functions and fit it:
+
+```{r fit-single-torsten, cache=TRUE, max.height='300px', comment=NA, eval=TRUE, echo=TRUE, include=TRUE}
+
+nonmem_data_single_fit <- nonmem_data_single %>% 
+  inner_join(observed_data_torsten, by = "time") %>% 
+  bind_rows(nonmem_data_single %>% 
+              filter(evid == 1)) %>% 
+  arrange(time) %>% 
+  mutate(dv = if_else(is.na(dv), 5555555, dv))
+
+i_obs <- nonmem_data_single_fit %>%
+  mutate(row_num = 1:n()) %>%
+  filter(evid == 0) %>%
+  select(row_num) %>%
+  deframe()
+
+n_obs <- length(i_obs)
+
+torsten_data_fit <- list(n_total = nrow(nonmem_data_single_fit),
+                         n_obs = n_obs,
+                         i_obs = i_obs,
+                         amt = nonmem_data_single_fit$amt,
+                         cmt = nonmem_data_single_fit$cmt,
+                         evid = nonmem_data_single_fit$evid,
+                         rate = nonmem_data_single_fit$rate,
+                         ii = nonmem_data_single_fit$ii,
+                         addl = nonmem_data_single_fit$addl,
+                         ss = nonmem_data_single_fit$ss,
+                         time = nonmem_data_single_fit$time,
+                         dv = nonmem_data_single_fit$dv,
+                         scale_cl = 10,
+                         scale_v = 10,
+                         scale_ka = 1,
+                         scale_sigma = 0.5,
+                         n_pred = nrow(nonmem_data_single),
+                         amt_pred = nonmem_data_single$amt,
+                         cmt_pred = nonmem_data_single$cmt,
+                         evid_pred = nonmem_data_single$evid,
+                         rate_pred = nonmem_data_single$rate,
+                         ii_pred = nonmem_data_single$ii,
+                         addl_pred = nonmem_data_single$addl,
+                         ss_pred = nonmem_data_single$ss,
+                         time_pred = nonmem_data_single$time)
+
+fit_single_torsten <- model_fit_torsten$sample(data = torsten_data_fit,
+                                         chains = 4,
+                                         # parallel_chains = 4,
+                                         iter_warmup = 1000,
+                                         iter_sampling = 1000,
+                                         adapt_delta = 0.95,
+                                         refresh = 500,
+                                         max_treedepth = 15,
+                                         seed = 8675309,
+                                         init = function() 
+                                           list(CL = rlnorm(1, log(8), 0.3),
+                                                V = rlnorm(1, log(40), 0.3),
+                                                KA = rlnorm(1, log(0.8), 0.3),
+                                                sigma = rlnorm(1, log(0.3), 0.3)))
+
+```
+
+:::
+
+### Post-Processing and What is Happening
+
+In the [post-processing](#post-processing) section, we will go through some of 
+the MCMC sampler checking that we should do here, but we will skip it for 
+brevity and go through it more thoroughly later. 
+
+We want to look at summaries of the posterior (posterior mean, median,
+quantiles, and standard deviation), posterior densities for our parameters, and
+2D joint posterior densities:
+
+```{r single-summarize, cache=TRUE, class.output="scroll-300", max.height='450px', fig.align="center"}
+summarize_draws(fit_single_torsten$draws(),
+                mean, median, sd, mcse_mean,
+                ~quantile2(.x, probs = c(0.025, 0.975)), rhat,
+                ess_bulk, ess_tail) %>%
+  mutate(rse = sd/mean*100,
+         across(where(is.numeric), round, 3)) %>%
+  select(variable, mean, sd, rse, q2.5, median, q97.5, rhat,
+         starts_with("ess")) %>%
+  knitr::kable(col.names = c("Variable", "Mean", "Std. Dev.", "RSE", "2.5%",
+                             "Median", "97.5%", "$\\hat{R}$", "ESS Bulk",
+                             "ESS Tail")) %>%
+  kableExtra::column_spec(column = 1:10, width = "30em") %>%
+  kableExtra::scroll_box(width = "800px", height = "200px")
+
+mcmc_pairs(fit_single_torsten$draws(c("CL", "V", "KA", "sigma")),
+           diag_fun = "dens")
+```
+
+We have also created a predicted curve for each draw from the posterior (
+```cp``` in the code). Here, 5 draws are highlighted, and you can see the curve
+corresponding to each of these draws, along with a few others:
+
+```{r single-draws-highlight, cache=TRUE, class.output="scroll-300", max.height='450px'}
+draws_single <- fit_single_torsten$draws(format = "draws_df")
+
+draws_to_highlight <- seq(1, 9, by = 2)
+colors_to_highlight <- c("red", "blue", "green", "purple", "orange")
+
+draws_single %>%
+  filter(.draw <= 100) %>%
+  select(starts_with("."), CL, V, KA, KE, sigma, starts_with(c("cp", "dv"))) %>%
+  as_tibble() %>%
+  mutate(across(where(is.double), round, 3)) %>%
+  DT::datatable(rownames = FALSE, filter = "top",
+                options = list(scrollX = TRUE,
+                               columnDefs = list(list(className = 'dt-center',
+                                                      targets = "_all")))) %>%
+  DT::formatStyle(".draw", target = "row",
+                  backgroundColor = DT::styleEqual(draws_to_highlight,
+                                                   colors_to_highlight))
+
+
+preds_single <- draws_single %>%
+  spread_draws(cp[i], dv_pred[i]) %>%
+  mutate(time = torsten_data_fit$time_pred[i]) %>%
+  ungroup() %>%
+  arrange(.draw, time)
+
+
+
+preds_single %>%
+  mutate(sample_draws = .draw %in% draws_to_highlight,
+         color = case_when(.draw == draws_to_highlight[1] ~
+                             colors_to_highlight[1],
+                           .draw == draws_to_highlight[2] ~
+                             colors_to_highlight[2],
+                           .draw == draws_to_highlight[3] ~
+                             colors_to_highlight[3],
+                           .draw == draws_to_highlight[4] ~
+                             colors_to_highlight[4],
+                           .draw == draws_to_highlight[5] ~
+                             colors_to_highlight[5],
+                           TRUE ~ "black")) %>%
+  # filter(.draw %in% c(draws_to_highlight, sample(11:max(.draw), 100))) %>%
+  filter(.draw <= 100) %>%
+  arrange(desc(.draw)) %>%
+  ggplot(aes(x = time, y = cp, group = .draw)) +
+  geom_line(aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  scale_color_manual(name = NULL,
+                     breaks = c("red", "blue", "green", "purple", "orange",
+                                "black"),
+                     values = c("red", "blue", "green", "purple", "orange",
+                                "black")) +
+  scale_size_manual(name = NULL,
+                    breaks = c(FALSE, TRUE),
+                    values = c(1, 1.5)) +
+  scale_alpha_manual(name = NULL,
+                     breaks = c(FALSE, TRUE),
+                     values = c(0.10, 1))  +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)")
+```
+
+This collection of predicted concentration curves, one for each sample from the
+posterior distribution, gives us a distribution for the "true" concentration
+at each time point. From this distribution we can plot our mean prediction
+(essentially an *IPRED* curve) and 95% credible interval (the Bayesian version
+of a confidence interval) for that mean:
+
+```{r single-ci, fig.align="center", cache=TRUE}
+(mean_and_ci <- preds_single %>%
+  group_by(time) %>%
+  mean_qi(cp, .width = 0.95) %>%
+  ggplot(aes(x = time, y = cp)) +
+  geom_line(size = 1.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              fill = "yellow", alpha = 0.25) +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+   coord_cartesian(ylim = c(0, 4.5)))
+```
+
+
+To do some model checking and to make future predictions, we can also get a mean
+prediction and 95% *prediction interval* from our replicates of the
+concentration (one replicate, ```dv```, for each draw from the posterior):
+
+```{r single-pi, fig.align="center", cache=TRUE}
+
+(mean_and_pi <- preds_single %>%
+  group_by(time) %>%
+  mean_qi(dv_pred, .width = 0.95) %>%
+  ggplot(aes(x = time, y = dv_pred)) +
+  geom_line(size = 1.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              fill = "yellow", alpha = 0.25) +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+   coord_cartesian(ylim = c(0, 6)))
+
+
+```
+
+What’s actually happening is that we get the *posterior density* of the
+prediction for a given time^[We actually do this with the ```dv``` curve, since
+we want a *prediction interval*, which involves residual error, but simulated DV
+curves (with residual error) are ugly, see [Appendix A](#appendix-a).]
+
+
+
+<p>
+  <a class="btn btn-primary" data-bs-toggle="collapse" href="#dv-curves" role="button" aria-expanded="false" aria-controls="dv-curves">
+    Show/Hide DV Curves
+  </a>
+</p>
+<div class="collapse" id="dv-curves">
+  <div class="card card-body">
+    
+```{r single-cp-and-dv-button, fig.align="center", cache=TRUE, echo=FALSE}
+
+preds_single_g <- draws_single %>%
+  gather_draws(cp[i], dv_pred[i]) %>%
+  mutate(time = torsten_data_fit$time_pred[i]) %>%
+  ungroup() %>%
+  arrange(.draw, time)
+
+preds_single_g %>%
+  mutate(sample_draws = .draw %in% draws_to_highlight,
+         color = case_when(.draw == draws_to_highlight[1] ~
+                             colors_to_highlight[1],
+                           .draw == draws_to_highlight[2] ~
+                             colors_to_highlight[2],
+                           .draw == draws_to_highlight[3] ~
+                             colors_to_highlight[3],
+                           .draw == draws_to_highlight[4] ~
+                             colors_to_highlight[4],
+                           .draw == draws_to_highlight[5] ~
+                             colors_to_highlight[5],
+                           TRUE ~ "black"),
+         type = if_else(.variable == "cp", "No Residual Error",
+                        "With Residual Error")) %>%
+  # filter(.draw %in% c(draws_to_highlight, sample(11:max(.draw), 100))) %>%
+  filter(.draw <= 100) %>%
+  arrange(desc(.draw)) %>% {
+  ggplot(., aes(x = time, y = .value, group = .draw)) +
+  geom_line(data = filter(., !sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  geom_line(data = filter(., sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  scale_color_manual(name = NULL,
+                     breaks = c("red", "blue", "green", "purple", "orange",
+                                "black"),
+                     values = c("red", "blue", "green", "purple", "orange",
+                                "black")) +
+  scale_size_manual(name = NULL,
+                    breaks = c(FALSE, TRUE),
+                    values = c(1, 1.5)) +
+  scale_alpha_manual(name = NULL,
+                     breaks = c(FALSE, TRUE),
+                     values = c(0.10, 1))  +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  facet_wrap(~ type)}
+
+```
+
+  </div>
+</div>
+
+Let’s look at the posterior density for the time points that were actually
+observed:
+
+```{r single-pi-density, fig.align="center", cache=TRUE}
+mean_and_pi +
+  stat_halfeye(data = preds_single %>%
+                 filter(time %in% times_to_observe),
+               aes(x = time, y = dv_pred, group = time),
+               scale = 2, interval_size = 2, .width = 0.95,
+               point_interval = mean_qi, normalize = "xy") +
+  geom_point(data = observed_data_torsten,
+             mapping = aes(x = time, y = dv), color = "red", size = 3) +
+  coord_cartesian(ylim = c(0, 6))
+```
+
+<p>
+  <a class="btn btn-primary" data-bs-toggle="collapse" href="#ci-pi" role="button" aria-expanded="false" aria-controls="ci-pi">
+    Show/Hide Intervals
+  </a>
+</p>
+<div class="collapse" id="ci-pi">
+  <div class="card card-body">
+
+```{r single-ci-pi-overlay-button, fig.align="center", cache=TRUE, echo=FALSE}
+preds_single_g %>% 
+  group_by(.variable, time) %>% 
+  mean_qi(.value) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = time, group = .variable)) +
+  geom_line(aes(y = .value), size = 2.1) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, alpha = .variable), 
+              fill = "blue") +
+  scale_alpha_discrete(name = "Interval Type",
+                      breaks = c("cp", "dv_pred"),
+                      labels = c("Credible", "Prediction"),
+                      range = c(0.5, 0.25)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "plain"),
+        axis.title = element_text(size = 18, face = "plain"),
+        axis.line = element_line(size = 1),
+        legend.position = "bottom") +
+  scale_x_continuous(name = "Time (h)") +
+  # scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  scale_y_continuous(name = latex2exp::TeX("Drug \\; Concentration \\;(\\mu g/mL)$")) +
+  # scale_x_continuous(name = latex2exp::TeX("$C_{ave_{0-24}} \\; (\\mu g/mL)$"), # "C_ave (ug/mL)",
+  #                    trans = "log10") +
+  geom_point(data = observed_data_torsten, aes(x = time, y = dv), 
+             color = "red", size = 2, inherit.aes = FALSE)
+```
+
+  </div>
+</div>
+
+## Appendix A {#appendix-a}
+
+```{r single-cp-and-dv, fig.align="center", cache=TRUE}
+
+preds_single_g <- draws_single %>%
+  gather_draws(cp[i], dv_pred[i]) %>%
+  mutate(time = torsten_data_fit$time_pred[i]) %>%
+  ungroup() %>%
+  arrange(.draw, time)
+
+preds_single_g %>%
+  mutate(sample_draws = .draw %in% draws_to_highlight,
+         color = case_when(.draw == draws_to_highlight[1] ~
+                             colors_to_highlight[1],
+                           .draw == draws_to_highlight[2] ~
+                             colors_to_highlight[2],
+                           .draw == draws_to_highlight[3] ~
+                             colors_to_highlight[3],
+                           .draw == draws_to_highlight[4] ~
+                             colors_to_highlight[4],
+                           .draw == draws_to_highlight[5] ~
+                             colors_to_highlight[5],
+                           TRUE ~ "black"),
+         type = if_else(.variable == "cp", "No Residual Error",
+                        "With Residual Error")) %>%
+  # filter(.draw %in% c(draws_to_highlight, sample(11:max(.draw), 100))) %>%
+  filter(.draw <= 100) %>%
+  arrange(desc(.draw)) %>% {
+  ggplot(., aes(x = time, y = .value, group = .draw)) +
+  geom_line(data = filter(., !sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  geom_line(data = filter(., sample_draws),
+            mapping = aes(size = sample_draws, alpha = sample_draws, color = color),
+            show.legend = FALSE) +
+  scale_color_manual(name = NULL,
+                     breaks = c("red", "blue", "green", "purple", "orange",
+                                "black"),
+                     values = c("red", "blue", "green", "purple", "orange",
+                                "black")) +
+  scale_size_manual(name = NULL,
+                    breaks = c(FALSE, TRUE),
+                    values = c(1, 1.5)) +
+  scale_alpha_manual(name = NULL,
+                     breaks = c(FALSE, TRUE),
+                     values = c(0.10, 1))  +
+  theme_bw(20) +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  facet_wrap(~ type)}
+
+```
+
+
+```{r single-ci-pi-overlay, fig.align="center", cache=TRUE}
+preds_single_g %>%
+  group_by(.variable, time) %>%
+  mean_qi(.value) %>%
+  ungroup() %>%
+  ggplot(aes(x = time, group = .variable)) +
+  geom_line(aes(y = .value), size = 2.1) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, alpha = .variable),
+              fill = "blue") +
+  scale_alpha_discrete(name = "Interval Type",
+                      breaks = c("cp", "dv_pred"),
+                      labels = c("Credible", "Prediction"),
+                      range = c(0.5, 0.25)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 14, face = "plain"),
+        axis.title = element_text(size = 18, face = "plain"),
+        axis.line = element_line(size = 1),
+        legend.position = "bottom") +
+  scale_x_continuous(name = "Time (h)") +
+  scale_y_continuous(name = "Drug Concentration (ug/mL)") +
+  geom_point(data = observed_data_torsten, aes(x = time, y = dv),
+             color = "red", size = 2, inherit.aes = FALSE)
+```

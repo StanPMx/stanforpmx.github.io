@@ -1,0 +1,32 @@
+project:
+  type: book
+  output-dir: docs
+
+book:
+  title: "Stan and R for Pharmacometrics"
+  repo-url: https://github.com/StanPMx/stanpmx.github.io 
+  repo-branch: main
+  repo-actions: [issue]
+  sharing: [twitter, facebook]
+  chapters:
+    - about.qmd 
+    - index.qmd
+    - part: Chapters
+      chapters: 
+        - intro.qmd
+        - stancodeblocks.qmd
+        - poppk.qmd
+        - logisticregression.qmd
+    - part: Support
+      chapters:
+        - installation.qmd
+        - logreg_ho_solution.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    theme: cosmo
+
+editor: visual
+

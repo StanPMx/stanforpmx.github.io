@@ -1,0 +1,197 @@
+# Logistic Regression Hands-On With Solution {.unnumbered}
+
+```{r setup, include = FALSE}
+library(summarytools)
+knitr::opts_chunk$set(echo = TRUE)
+st_options(bootstrap.css     = FALSE,       
+           plain.ascii       = FALSE,       
+           style             = "rmarkdown", 
+           dfSummary.silent  = TRUE,       
+           footnote          = NA,       
+           subtitle.emphasis = FALSE)       
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Load Relevant Libraries {.unnumbered}
+
+```{r, warning = FALSE, results='hide', message = FALSE}
+library(summarytools)
+library(tidyverse) 
+library(brms)
+library(bayesplot)
+library(tidybayes) 
+library(gridExtra) 
+library(patchwork) 
+```
+
+A simulated dataset for this exercise **simlrcovs.csv** was developed. It has the following columns:
+
+1.  DOSE: Dose of drug in mg \[20, 50, 100, 200 mg\]
+2.  CAVG: Average concentration until the time of the event (mg/L)
+3.  ECOG: ECOG performance status \[0 = Fully active; 1 = Restricted in physical activity\]
+4.  RACE: Race \[1 = Others; 2 = White\]
+5.  SEX: Sex \[1 = Female; 2 = Male\]
+6.  BRNMETS: Brain metastasis \[1 = Yes; 0 = No\]
+7.  DV: Event \[1 = Yes; 0 = No\]
+
+## Import Dataset {.unnumbered}
+
+```{r}
+# Read the dataset
+hoRaw <- read.csv("data/simlrcovs.csv") %>% 
+  as_tibble()
+```
+
+## Data Processing {.unnumbered}
+
+Convert categorical explanatory variables to factors
+
+```{r}
+hoData <- hoRaw %>% 
+  mutate(ECOG = factor(ECOG, levels = c(0, 1), labels = c("Active", "Restricted")),
+         RACE = factor(RACE, levels = c(0, 1), labels = c("White", "Others")),
+         SEX = factor(SEX, levels = c(0, 1), labels = c("Male", "Female")),
+         BRNMETS = factor(BRNMETS, levels = c(0, 1), labels = c("No", "Yes")))
+hoData
+```
+
+## Data Summary {.unnumbered}
+
+```{r}
+print(summarytools::dfSummary(hoData,
+          varnumbers = FALSE,
+          valid.col = FALSE,
+          graph.magnif = 0.76),
+      method = "render")
+```
+
+## Model Fit {.unnumbered}
+
+With all covariates except DOSE (since we have exposure as a driver)
+
+```{r, warning = FALSE, results='hide', message = FALSE, cache=TRUE}
+hofit1 <-  brm(DV ~ CAVG + ECOG + RACE + SEX + BRNMETS,
+           data = hoData,
+           family = bernoulli(),
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+# freqhofit <-  glm(DV ~ CAVG + ECOG + RACE + SEX + BRNMETS,
+#                family = "binomial",
+#                data = hoData)
+# summary(freqhofit)
+```
+
+## Model Evaluation {.unnumbered}
+
+```{r}
+summary(hofit1)
+fixef(hofit1)
+```
+
+## Final Model {.unnumbered}
+
+```{r, warning = FALSE, results='hide', message = FALSE, cache=TRUE}
+hofit2 <-  brm(DV ~ CAVG + RACE,
+           data = hoData,
+           family = bernoulli(),
+           chains = 4,
+           warmup = 1000,
+           iter = 2000,
+           seed = 12345,
+           refresh = 0,
+           backend = "cmdstanr")
+```
+
+## Summary {.unnumbered}
+
+```{r}
+summary(hofit2)
+fixef(hofit2)
+```
+
+## Model Convergence {.unnumbered}
+
+```{r}
+hopost <- as_draws_df(hofit2, add_chain = T)
+mcmc_trace(hopost[, -4],
+           facet_args = list(ncol = 2)) +
+  theme_bw()
+```
+
+```{r}
+mcmc_acf(hopost[, -4]) + 
+  theme_bw()
+```
+
+## Visual Interpretation of the Model (Bonus Points!) {.unnumbered}
+
+We can do this two ways.
+
+### Generate Posterior Probabilities Manually {.unnumbered}
+
+Generate posterior probability of the event using the estimates and their associated posterior distributions
+
+```{r}
+out <- hofit2 %>%
+  spread_draws(b_Intercept, b_CAVG, b_RACEOthers) %>% 
+  mutate(CAVG = list(seq(100, 4000, 10))) %>% 
+  unnest(cols = c(CAVG)) %>%
+  mutate(RACE = list(0:1)) %>% 
+  unnest(cols = c(RACE)) %>% 
+  mutate(PRED = exp(b_Intercept + b_CAVG * CAVG + b_RACEOthers * RACE)/(1 + exp(b_Intercept + b_CAVG * CAVG + b_RACEOthers * RACE))) %>%
+  group_by(CAVG, RACE) %>%
+  summarise(pred_m = mean(PRED, na.rm = TRUE),
+            pred_low = quantile(PRED, prob = 0.025),
+            pred_high = quantile(PRED, prob = 0.975)) %>% 
+  mutate(RACE = factor(RACE, levels = c(0, 1), labels = c("White", "Others")))
+```
+
+Plot The Probability of the Event vs Average Concentration
+
+```{r}
+out %>%
+  ggplot(aes(x = CAVG, y = pred_m, color = factor(RACE))) +
+  geom_line() +
+  geom_ribbon(aes(ymin = pred_low, ymax = pred_high, fill = factor(RACE)), alpha = 0.2) +
+  ylab("Predicted Probability of the Event\n") +
+  xlab("\nAverage Concentration until the Event (mg/L)") +
+  theme_bw() + 
+  scale_fill_discrete("") +
+  scale_color_discrete("") +
+  theme(legend.position = "top")
+```
+
+### Generate Posterior Probabilities Using Helper Functions from `brms` and `tidybayes` {.unnumbered}
+
+Generate posterior probability of the event using the estimates and their associated posterior distributions
+
+```{r}
+out2 <- hofit2 %>%
+  epred_draws(newdata = expand_grid(CAVG = seq(100, 4000, by = 10), 
+                                    RACE = c("White", "Others")),
+              value = "PRED") %>% 
+  ungroup() %>% 
+  mutate(RACE = factor(RACE, levels = c("White", "Others"), 
+                       labels = c("White", "Others")))
+```
+
+Plot The Probability of the Event vs Average Concentration
+
+```{r}
+out2 %>% 
+  ggplot() +
+  stat_lineribbon(aes(x = CAVG, y = PRED, color = RACE, fill = RACE), 
+                  .width = 0.95, alpha = 0.25) +
+  ylab("Predicted Probability of the Event\n") +
+  xlab("\nAverage Concentration until the Event (mg/L)") +
+  theme_bw() + 
+  scale_fill_discrete("") +
+  scale_color_discrete("") +
+  theme(legend.position = "top") +
+  ylim(c(0, 1))
+```
